@@ -48,15 +48,30 @@ jobs:
             "${{ inputs.kernel_repo }}" \
             kernel/common
 
+
       - name: Kernel information
         working-directory: kernel/common
         run: |
-          echo "Kernel commit:"
+          echo "===== Kernel information ====="
+          echo "Repository:"
+          git remote get-url origin
+
+          echo ""
+          echo "Branch:"
+          git branch --show-current
+
+          echo ""
+          echo "Commit:"
           git rev-parse HEAD
 
           echo ""
           echo "Kernel version:"
-          make kernelversion
+          make -s kernelversion
+
+          echo ""
+          echo "Android kernel config:"
+          grep -E '^(CONFIG_ANDROID|CONFIG_GKI|CONFIG_NTSYNC)=' .config 2>/dev/null || true
+
 
       - name: Apply NTSync
         if: ${{ inputs.ntsync }}
