@@ -48,3 +48,13 @@ jobs:
           echo ""
           echo "Kernel version:"
           make kernelversion
+
+      - name: Apply NTSync
+        run: |
+          chmod +x scripts/apply_ntsync.sh
+
+          KVER=$(cd kernel/common && make kernelversion)
+
+          scripts/apply_ntsync.sh \
+          kernel/common \
+          "$KVER"
