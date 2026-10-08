@@ -1,3 +1,4 @@
+
 name: Universal GKI Builder
 
 on:
@@ -7,11 +8,19 @@ on:
         description: "Kernel repository URL"
         required: true
         default: "https://android.googlesource.com/kernel/common"
+        type: string
 
       kernel_branch:
         description: "Kernel branch"
         required: true
         default: "android12-5.10"
+        type: string
+
+      ntsync:
+        description: "Apply NTSync patches (only kernel 5.10)"
+        required: true
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -19,25 +28,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout builder
         uses: actions/checkout@v4
 
       - name: Setup dependencies
         run: |
           sudo apt update
-          sudo apt install -y git bc bison flex libssl-dev make clang llvm
+          sudo apt install -y git bc bison flex libssl-dev make clang llvm patch
 
       - name: Clone kernel
-        working-directory: kernel
         run: |
-          echo "Downloading kernel..."
+          set -euo pipefail
+          mkdir -p kernel
 
           git clone \
-          --depth=1 \
-          --branch "${{ inputs.kernel_branch }}" \
-          "${{ inputs.kernel_repo }}" \
-          common
+            --depth=1 \
+            --single-branch \
+            --branch "${{ inputs.kernel_branch }}" \
+            "${{ inputs.kernel_repo }}" \
+            kernel/common
 
       - name: Kernel information
         working-directory: kernel/common
@@ -50,11 +59,18 @@ jobs:
           make kernelversion
 
       - name: Apply NTSync
+        if: ${{ inputs.ntsync }}
+        env:
+          NTSYNC_ENABLED: "true"
         run: |
           chmod +x scripts/apply_ntsync.sh
 
-          KVER=$(cd kernel/common && make kernelversion)
+          KVER=$(make -s -C kernel/common kernelversion)
 
           scripts/apply_ntsync.sh \
-          kernel/common \
-          "$KVER"
+            kernel/common \
+            "$KVER"
+
+      - name: Skip NTSync
+        if: ${{ !inputs.ntsync }}
+        run: echo "NTSync disabled. Skipping patches."
