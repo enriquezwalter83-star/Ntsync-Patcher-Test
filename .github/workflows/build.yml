@@ -1,1 +1,50 @@
+name: Universal GKI Builder
 
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "Kernel repository URL"
+        required: true
+        default: "https://android.googlesource.com/kernel/common"
+
+      kernel_branch:
+        description: "Kernel branch"
+        required: true
+        default: "android12-5.10"
+
+jobs:
+  build:
+    name: Setup Kernel
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout builder
+        uses: actions/checkout@v4
+
+      - name: Setup dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git bc bison flex libssl-dev make clang llvm
+
+      - name: Clone kernel
+        working-directory: kernel
+        run: |
+          echo "Downloading kernel..."
+
+          git clone \
+          --depth=1 \
+          --branch "${{ inputs.kernel_branch }}" \
+          "${{ inputs.kernel_repo }}" \
+          common
+
+      - name: Kernel information
+        working-directory: kernel/common
+        run: |
+          echo "Kernel commit:"
+          git rev-parse HEAD
+
+          echo ""
+          echo "Kernel version:"
+          make kernelversion
