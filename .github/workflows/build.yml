@@ -73,6 +73,27 @@ jobs:
           grep -E '^(CONFIG_ANDROID|CONFIG_GKI|CONFIG_NTSYNC)=' .config 2>/dev/null || true
 
 
+      - name: Diagnose NTSync compatibility
+        if: ${{ inputs.ntsync }}
+        run: |
+          set -euo pipefail
+
+          echo "===== Kernel version ====="
+          make -s -C kernel/common kernelversion
+
+          echo ""
+          echo "===== Compatibility patch check ====="
+          git -C kernel/common apply --check \
+            "$GITHUB_WORKSPACE/patches/ntsync/android12-5.10/ntsync_compat_android12-5.10.patch" \
+            || true
+
+          echo ""
+          echo "===== Reverse check ====="
+          git -C kernel/common apply --reverse --check \
+            "$GITHUB_WORKSPACE/patches/ntsync/android12-5.10/ntsync_compat_android12-5.10.patch" \
+            || true
+
+
       - name: Apply NTSync
         if: ${{ inputs.ntsync }}
         env:
