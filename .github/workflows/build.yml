@@ -111,6 +111,39 @@ jobs:
           echo ""
           echo "===== lockdep.c: assertion implementation ====="
           sed -n '5570,5620p' "$K/kernel/locking/lockdep.c"
+
+      - name: Inspect NTSync compatibility points
+        if: ${{ inputs.ntsync }}
+        shell: bash
+        run: |
+          set -eu
+          K=kernel/common
+
+          echo "===== VERSION ====="
+          make -s -C "$K" kernelversion
+
+          echo "===== NTSYNC CONFIG LOCATION ====="
+          grep -n -E 'config (SGI_GRU_DEBUG|APDS9802ALS|NTSYNC)' \
+            "$K/drivers/misc/Kconfig" || true
+
+          echo "===== MISC MAKEFILE CONTEXT ====="
+          sed -n '15,45p' "$K/drivers/misc/Makefile"
+
+          echo "===== LOCKDEP STATE DEFINITIONS ====="
+          grep -n -E 'LOCK_STATE_|lockdep_assert(_once|_not_held|_held)' \
+            "$K/include/linux/lockdep.h" || true
+
+          echo "===== LOCKDEP HEADER: ASSERTIONS ====="
+          sed -n '285,420p' "$K/include/linux/lockdep.h"
+
+          echo "===== LOCKDEP C: INCLUDES ====="
+          sed -n '35,75p' "$K/kernel/locking/lockdep.c"
+
+          echo "===== LOCKDEP C: HELD CHECK ====="
+          sed -n '5285,5335p' "$K/kernel/locking/lockdep.c"
+
+          echo "===== LOCKDEP C: PUBLIC HELD CHECK ====="
+          sed -n '5585,5625p' "$K/kernel/locking/lockdep.c"
       
       - name: Apply NTSync
         if: ${{ inputs.ntsync }}
