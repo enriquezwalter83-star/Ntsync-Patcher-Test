@@ -1,55 +1,322 @@
-set -euo pipefail
+name: Build Android Kernel 5.10 + NTSync
 
-K="$GITHUB_WORKSPACE/kernel/common"
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_source:
+        description: "Fuente del kernel"
+        required: true
+        type: choice
+        options:
+          - yuuka
+          - android-common
+          - custom
+        default: yuuka
 
-if [[ ! -d "$K/.git" ]]; then
-  echo "::error::No existe un repositorio Git en $K"
-  echo "Hay que revisar el paso anterior que descarga el kernel."
-  exit 1
-fi
+      repository_url:
+        description: "URL Git personalizada (opcional)"
+        required: false
+        type: string
+        default: ""
 
-# Crear origin si no existe; actualizarlo si ya existe.
-if git -C "$K" remote get-url origin >/dev/null 2>&1; then
-  git -C "$K" remote set-url origin "$KERNEL_REPO"
-else
-  git -C "$K" remote add origin "$KERNEL_REPO"
-fi
+      kernel_ref:
+        description: "Rama o tag (vacío = valor predeterminado)"
+        required: false
+        type: string
+        default: ""
 
-TAG_SHA="$(
-  git ls-remote --refs "$KERNEL_REPO" \
-    "refs/tags/$KERNEL_REF" | cut -f1
-)"
+      ntsync:
+        description: "Aplicar parches NTSync"
+        required: true
+        type: boolean
+        default: true
 
-BRANCH_SHA="$(
-  git ls-remote --heads "$KERNEL_REPO" \
-    "refs/heads/$KERNEL_REF" | cut -f1
-)"
+permissions:
+  contents: read
 
-if [[ -n "$TAG_SHA" ]]; then
-  echo "Selected reference is a tag: $KERNEL_REF"
+concurrency:
+  group: kernel-build-${{ github.ref }}
+  cancel-in-progress: false
 
-  git -C "$K" fetch --depth=1 origin \
-    "refs/tags/$KERNEL_REF"
+jobs:
+  build:
+    name: Download, patch and compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
 
-  git -C "$K" checkout --detach FETCH_HEAD
+    steps:
+      - name: Checkout patcher
+        uses: actions/checkout@v4
 
-elif [[ -n "$BRANCH_SHA" ]]; then
-  echo "Selected reference is a branch: $KERNEL_REF"
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
 
-  git -C "$K" fetch --depth=1 origin \
-    "refs/heads/$KERNEL_REF"
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential cpio curl flex \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            clang llvm lld \
+            libelf-dev libssl-dev pahole \
+            python3 rsync
 
-  git -C "$K" checkout -B selected-kernel FETCH_HEAD
+      - name: Install repo launcher
+        shell: bash
+        run: |
+          set -euo pipefail
 
-else
-  echo "::error::Reference not found: $KERNEL_REF"
-  exit 1
-fi
+          sudo curl -fsSL \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o /usr/local/bin/repo
 
-echo ""
-echo "===== Selected commit ====="
-git -C "$K" rev-parse HEAD
+          sudo chmod a+x /usr/local/bin/repo
+          repo --version
 
-echo ""
-echo "===== Detected kernel version ====="
-make -s -C "$K" kernelversion
+      - name: Resolve kernel source
+        id: source
+        shell: bash
+        env:
+          SELECTED_SOURCE: ${{ inputs.kernel_source }}
+          CUSTOM_URL: ${{ inputs.repository_url }}
+          CUSTOM_REF: ${{ inputs.kernel_ref }}
+        run: |
+          set -euo pipefail
+
+          case "$SELECTED_SOURCE" in
+            yuuka)
+              DEFAULT_URL="https://github.com/MillenniumOSS/android_kernel_common_android12-5.10.git"
+              DEFAULT_REF="yuuka-main"
+              ;;
+            android-common)
+              DEFAULT_URL="https://android.googlesource.com/kernel/common"
+              DEFAULT_REF="android12-5.10.246_r00"
+              ;;
+            custom)
+              DEFAULT_URL=""
+              DEFAULT_REF=""
+              ;;
+            *)
+              echo "::error::Unknown kernel source."
+              exit 1
+              ;;
+          esac
+
+          if [[ -n "${CUSTOM_URL//[[:space:]]/}" ]]; then
+            KERNEL_URL="$CUSTOM_URL"
+          else
+            KERNEL_URL="$DEFAULT_URL"
+          fi
+
+          if [[ -n "${CUSTOM_REF//[[:space:]]/}" ]]; then
+            KERNEL_REF="$CUSTOM_REF"
+          else
+            KERNEL_REF="$DEFAULT_REF"
+          fi
+
+          if [[ -z "$KERNEL_URL" ]]; then
+            echo "::error::Custom source requires repository_url."
+            exit 1
+          fi
+
+          if [[ -z "$KERNEL_REF" ]]; then
+            echo "::error::Custom source requires kernel_ref."
+            exit 1
+          fi
+
+          echo "url=$KERNEL_URL" >> "$GITHUB_OUTPUT"
+          echo "ref=$KERNEL_REF" >> "$GITHUB_OUTPUT"
+
+          echo "Selected source: $SELECTED_SOURCE"
+          echo "Selected ref: $KERNEL_REF"
+          echo "Repository: $KERNEL_URL"
+
+      - name: Initialize Android kernel build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/android-kernel"
+          cd "$GITHUB_WORKSPACE/android-kernel"
+
+          repo init \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b common-android12-5.10 \
+            --depth=1
+
+          repo sync -c -j2
+
+      - name: Select kernel branch or tag
+        id: kernel
+        shell: bash
+        env:
+          KERNEL_REPO: ${{ steps.source.outputs.url }}
+          KERNEL_REF: ${{ steps.source.outputs.ref }}
+        run: |
+          set -euo pipefail
+
+          K="$GITHUB_WORKSPACE/android-kernel/kernel/common"
+
+          if ! git -C "$K" rev-parse --is-inside-work-tree \
+              >/dev/null 2>&1; then
+            echo "::error::kernel/common is not a Git worktree."
+            exit 1
+          fi
+
+          # A repo-managed checkout may not have a remote named origin.
+          if git -C "$K" remote get-url origin >/dev/null 2>&1; then
+            git -C "$K" remote set-url origin "$KERNEL_REPO"
+          else
+            git -C "$K" remote add origin "$KERNEL_REPO"
+          fi
+
+          TAG_SHA="$(
+            git ls-remote --refs "$KERNEL_REPO" \
+              "refs/tags/$KERNEL_REF" | cut -f1
+          )"
+
+          BRANCH_SHA="$(
+            git ls-remote --heads "$KERNEL_REPO" \
+              "refs/heads/$KERNEL_REF" | cut -f1
+          )"
+
+          if [[ -n "$TAG_SHA" ]]; then
+            echo "Selected tag: $KERNEL_REF"
+
+            git -C "$K" fetch --depth=1 origin \
+              "refs/tags/$KERNEL_REF"
+
+            git -C "$K" checkout --detach FETCH_HEAD
+
+          elif [[ -n "$BRANCH_SHA" ]]; then
+            echo "Selected branch: $KERNEL_REF"
+
+            git -C "$K" fetch --depth=1 origin \
+              "refs/heads/$KERNEL_REF"
+
+            git -C "$K" checkout -B selected-kernel FETCH_HEAD
+
+          else
+            echo "::error::Reference not found: $KERNEL_REF"
+            exit 1
+          fi
+
+          VERSION="$(make -s -C "$K" kernelversion)"
+          echo "Kernel version: $VERSION"
+
+          if [[ ! "$VERSION" =~ ^5\.10\.[0-9]+([+-].*)?$ ]]; then
+            echo "::error::Expected Linux 5.10.x, detected $VERSION"
+            exit 1
+          fi
+
+          echo "dir=$K" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "Selected commit:"
+          git -C "$K" rev-parse HEAD
+
+      - name: Apply NTSync patches
+        if: ${{ inputs.ntsync }}
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+          KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          PATCH_SCRIPT="$GITHUB_WORKSPACE/scripts/apply_ntsync.sh"
+
+          if [[ ! -f "$PATCH_SCRIPT" ]]; then
+            echo "::error::scripts/apply_ntsync.sh was not found."
+            exit 1
+          fi
+
+          bash "$PATCH_SCRIPT" "$KERNEL_DIR" "$KERNEL_VERSION"
+
+      - name: Enable NTSync in GKI defconfig
+        if: ${{ inputs.ntsync }}
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+        run: |
+          set -euo pipefail
+
+          DEFCONFIG="$KERNEL_DIR/arch/arm64/configs/gki_defconfig"
+
+          if [[ ! -f "$DEFCONFIG" ]]; then
+            echo "::error::gki_defconfig not found."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_NTSYNC=y$' "$DEFCONFIG"; then
+            printf '\nCONFIG_NTSYNC=y\n' >> "$DEFCONFIG"
+          fi
+
+          grep -n '^CONFIG_NTSYNC=y$' "$DEFCONFIG"
+
+      - name: Compile ARM64 kernel
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+          ENABLE_NTSYNC: ${{ inputs.ntsync }}
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/android-kernel"
+
+          if [[ ! -f build/build.sh ]]; then
+            echo "::error::Android kernel build/build.sh not found."
+            exit 1
+          fi
+
+          if [[ "$ENABLE_NTSYNC" == "true" ]]; then
+            BUILD_CONFIG=common/build.config.gki.aarch64 \
+              build/build.sh -j"$(nproc)"
+          else
+            BUILD_CONFIG=common/build.config.gki.aarch64 \
+              build/build.sh -j"$(nproc)"
+          fi
+
+      - name: List build outputs
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="$GITHUB_WORKSPACE/android-kernel/out"
+
+          if [[ -d "$OUT" ]]; then
+            find "$OUT" -type f \
+              \( -name 'Image' \
+              -o -name 'Image.gz' \
+              -o -name 'Image.lz4' \
+              -o -name '*.ko' \
+              -o -name 'System.map' \
+              -o -name 'vmlinux' \
+              -o -name '*.img' \
+              -o -name '*.dtb' \
+              -o -name '*.dtbo' \
+              -o -name '.config' \) \
+              -printf '%p (%s bytes)\n' || true
+          else
+            echo "No output directory was created."
+          fi
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-5.10-${{ steps.kernel.outputs.version }}
+          if-no-files-found: warn
+          path: |
+            android-kernel/out/**/dist/**
+            android-kernel/out/**/Image
+            android-kernel/out/**/Image.gz
+            android-kernel/out/**/Image.lz4
+            android-kernel/out/**/vmlinux
+            android-kernel/out/**/System.map
+            android-kernel/out/**/*.ko
+            android-kernel/out/**/*.dtb
+            android-kernel/out/**/*.dtbo
+            android-kernel/out/**/.config
