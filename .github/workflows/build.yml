@@ -1,6 +1,6 @@
 name: Build Yuuka 5.10 + NTSync + AnyKernel3
 
-on:
+'on':
   workflow_dispatch:
     inputs:
       kernel_source:
