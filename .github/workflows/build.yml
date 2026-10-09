@@ -1,0 +1,435 @@
+
+name: Build Yuuka 5.10 + NTSync + AnyKernel3
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_source:
+        description: "Fuente del kernel"
+        required: true
+        type: choice
+        options:
+          - yuuka
+          - android-common
+          - custom
+        default: yuuka
+
+      repository_url:
+        description: "URL Git personalizada (opcional)"
+        required: false
+        type: string
+        default: ""
+
+      kernel_ref:
+        description: "Rama o tag del kernel"
+        required: false
+        type: string
+        default: ""
+
+      ntsync:
+        description: "Aplicar parches NTSync"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build kernel and package AnyKernel3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout patcher
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential cpio flex \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            clang llvm lld \
+            libelf-dev libssl-dev pahole \
+            python3 rsync zip unzip
+
+          echo "Compiler:"
+          clang --version
+          echo "Linker:"
+          ld.lld --version
+
+      - name: Select kernel repository
+        id: source
+        shell: bash
+        env:
+          SELECTED_SOURCE: ${{ inputs.kernel_source }}
+          CUSTOM_URL: ${{ inputs.repository_url }}
+          CUSTOM_REF: ${{ inputs.kernel_ref }}
+        run: |
+          set -euo pipefail
+
+          case "$SELECTED_SOURCE" in
+            yuuka)
+              DEFAULT_URL="https://github.com/MillenniumOSS/android_kernel_common_android12-5.10.git"
+              DEFAULT_REF="yuuka-main"
+              ;;
+            android-common)
+              DEFAULT_URL="https://android.googlesource.com/kernel/common"
+              DEFAULT_REF="android12-5.10.246_r00"
+              ;;
+            custom)
+              DEFAULT_URL=""
+              DEFAULT_REF=""
+              ;;
+            *)
+              echo "::error::Unknown kernel source."
+              exit 1
+              ;;
+          esac
+
+          KERNEL_URL="$DEFAULT_URL"
+          KERNEL_REF="$DEFAULT_REF"
+
+          if [[ -n "${CUSTOM_URL//[[:space:]]/}" ]]; then
+            KERNEL_URL="$CUSTOM_URL"
+          fi
+
+          if [[ -n "${CUSTOM_REF//[[:space:]]/}" ]]; then
+            KERNEL_REF="$CUSTOM_REF"
+          fi
+
+          if [[ -z "$KERNEL_URL" || -z "$KERNEL_REF" ]]; then
+            echo "::error::A repository URL and branch/tag are required."
+            exit 1
+          fi
+
+          echo "url=$KERNEL_URL" >> "$GITHUB_OUTPUT"
+          echo "ref=$KERNEL_REF" >> "$GITHUB_OUTPUT"
+
+          echo "Repository: $KERNEL_URL"
+          echo "Reference: $KERNEL_REF"
+
+      - name: Clone kernel
+        id: kernel
+        shell: bash
+        env:
+          KERNEL_REPO: ${{ steps.source.outputs.url }}
+          KERNEL_REF: ${{ steps.source.outputs.ref }}
+        run: |
+          set -euo pipefail
+
+          K="$GITHUB_WORKSPACE/kernel-source"
+
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "$KERNEL_REF" \
+            "$KERNEL_REPO" "$K"
+
+          if [[ ! -f "$K/Makefile" ]]; then
+            echo "::error::Kernel Makefile not found."
+            exit 1
+          fi
+
+          VERSION="$(make -s -C "$K" kernelversion)"
+          COMMIT="$(git -C "$K" rev-parse HEAD)"
+
+          if [[ ! "$VERSION" =~ ^5\.10\.[0-9]+([+-].*)?$ ]]; then
+            echo "::error::Only Linux 5.10.x is supported. Detected: $VERSION"
+            exit 1
+          fi
+
+          echo "dir=$K" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+          echo "Kernel version: $VERSION"
+          echo "Kernel commit: $COMMIT"
+
+      - name: Apply NTSync patches
+        if: ${{ inputs.ntsync }}
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+          KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          SCRIPT="$GITHUB_WORKSPACE/scripts/apply_ntsync.sh"
+
+          if [[ ! -f "$SCRIPT" ]]; then
+            echo "::error::scripts/apply_ntsync.sh not found."
+            exit 1
+          fi
+
+          bash "$SCRIPT" "$KERNEL_DIR" "$KERNEL_VERSION"
+
+      - name: Configure kernel without editing source defconfig
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+          ENABLE_NTSYNC: ${{ inputs.ntsync }}
+        run: |
+          set -euo pipefail
+
+          K="$KERNEL_DIR"
+          OUT="$GITHUB_WORKSPACE/kernel-out"
+
+          mkdir -p "$OUT"
+
+          if [[ -f "$K/arch/arm64/configs/gki_defconfig" ]]; then
+            DEFCONFIG="gki_defconfig"
+          elif [[ -f "$K/arch/arm64/configs/defconfig" ]]; then
+            DEFCONFIG="defconfig"
+          else
+            echo "::error::No ARM64 defconfig found."
+            exit 1
+          fi
+
+          echo "Using original source configuration: $DEFCONFIG"
+
+          make -C "$K" \
+            O="$OUT" \
+            ARCH=arm64 \
+            LLVM=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            "$DEFCONFIG"
+
+          # Save the configuration generated from the source defconfig.
+          # This is an OUT file; the source defconfig remains untouched.
+          cp "$OUT/.config" \
+            "$GITHUB_WORKSPACE/kernel-config-before-ntsync"
+
+          if [[ "$ENABLE_NTSYNC" == "true" ]]; then
+            if ! grep -RqsE 'config NTSYNC([[:space:]]|$)' \
+                "$K/drivers" "$K/kernel" "$K/fs" "$K/arch/arm64" \
+                2>/dev/null; then
+              echo "::error::NTSYNC Kconfig entry was not found."
+              exit 1
+            fi
+
+            "$K/scripts/config" \
+              --file "$OUT/.config" \
+              --enable NTSYNC
+
+            make -C "$K" \
+              O="$OUT" \
+              ARCH=arm64 \
+              LLVM=1 \
+              CROSS_COMPILE=aarch64-linux-gnu- \
+              olddefconfig
+
+            if ! grep -q '^CONFIG_NTSYNC=y$' "$OUT/.config"; then
+              echo "::error::CONFIG_NTSYNC is not enabled."
+              exit 1
+            fi
+          fi
+
+          cp "$OUT/.config" "$GITHUB_WORKSPACE/kernel-config"
+
+          # Record configuration differences for review.
+          if [[ -x "$K/scripts/diffconfig" ]]; then
+            "$K/scripts/diffconfig" \
+              "$GITHUB_WORKSPACE/kernel-config-before-ntsync" \
+              "$GITHUB_WORKSPACE/kernel-config" \
+              > "$GITHUB_WORKSPACE/kernel-config-diff.txt" || true
+          else
+            diff -u \
+              "$GITHUB_WORKSPACE/kernel-config-before-ntsync" \
+              "$GITHUB_WORKSPACE/kernel-config" \
+              > "$GITHUB_WORKSPACE/kernel-config-diff.txt" || true
+          fi
+
+          echo "Relevant final options:"
+          grep -E '^(CONFIG_NTSYNC|CONFIG_LRU_GEN|CONFIG_LRU_GEN_ENABLED)=' \
+            "$GITHUB_WORKSPACE/kernel-config" || true
+
+          echo "Configuration differences saved for review."
+
+      - name: Compile kernel
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+        run: |
+          set -euo pipefail
+
+          K="$KERNEL_DIR"
+          OUT="$GITHUB_WORKSPACE/kernel-out"
+          JOBS="$(nproc)"
+
+          echo "Building ARM64 kernel with $JOBS jobs"
+
+          make -C "$K" \
+            O="$OUT" \
+            ARCH=arm64 \
+            LLVM=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            -j"$JOBS" \
+            Image modules dtbs
+
+          if [[ ! -s "$OUT/arch/arm64/boot/Image" ]]; then
+            echo "::error::Kernel Image was not generated."
+            exit 1
+          fi
+
+      - name: Package experimental Tanzanite AnyKernel3 ZIP
+        id: package
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+          KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+          KERNEL_COMMIT: ${{ steps.kernel.outputs.commit }}
+          KERNEL_REPO: ${{ steps.source.outputs.url }}
+          KERNEL_REF: ${{ steps.source.outputs.ref }}
+          ENABLE_NTSYNC: ${{ inputs.ntsync }}
+        run: |
+          set -euo pipefail
+
+          OUT="$GITHUB_WORKSPACE/kernel-out"
+          AK3="$GITHUB_WORKSPACE/AnyKernel3"
+          KERNEL_IMAGE="$OUT/arch/arm64/boot/Image"
+
+          if [[ ! -s "$KERNEL_IMAGE" ]]; then
+            echo "::error::Compiled Image is missing."
+            exit 1
+          fi
+
+          # Obtain the upstream AnyKernel3 installer.
+          git clone --depth=1 \
+            https://github.com/osm0sis/AnyKernel3.git "$AK3"
+
+          # Tanzanite's device tree uses Image.gz as the kernel payload.
+          # The installer will preserve the existing boot image's other
+          # components rather than injecting generic DTB/DTBO files.
+          gzip -n -9 -c "$KERNEL_IMAGE" > "$AK3/Image.gz"
+
+          # Replace the upstream example installer entirely. Do not keep
+          # its sample-device ramdisk modifications.
+          cat > "$AK3/anykernel.sh" <<'AK3SCRIPT'
+          #!/sbin/sh
+
+          properties() { '
+          kernel.string=Yuuka 5.10 + NTSync - Tanzanite (EXPERIMENTAL)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=tanzanite
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          dump_boot;
+          write_boot;
+          AK3SCRIPT
+
+          chmod 755 "$AK3/anykernel.sh"
+
+          if [[ "$ENABLE_NTSYNC" == "true" ]]; then
+            NTSYNC_STATUS="enabled"
+            FEATURE_TAG="NTSync"
+          else
+            NTSYNC_STATUS="disabled"
+            FEATURE_TAG="NoNTSync"
+          fi
+
+          CLANG_VERSION="$(clang --version | head -n 1)"
+          LRU_STATUS="$(grep -E '^(CONFIG_LRU_GEN|CONFIG_LRU_GEN_ENABLED)=' \
+            "$GITHUB_WORKSPACE/kernel-config" | paste -sd ', ' - || true)"
+
+          cat > "$AK3/BUILD_INFO.txt" <<EOF
+          Device: Redmi Note 14 4G (tanzanite)
+          ROM target: crDroid Android 16
+          Kernel version: $KERNEL_VERSION
+          Kernel source: $KERNEL_REPO
+          Kernel ref: $KERNEL_REF
+          Kernel commit: $KERNEL_COMMIT
+          NTSync: $NTSYNC_STATUS
+          Compiler: $CLANG_VERSION
+          MGLRU-related config: ${LRU_STATUS:-not reported by selected config}
+          Package type: experimental kernel-only AnyKernel3 ZIP
+          Modules: not included in this ZIP
+          DTB/DTBO: not replaced by this ZIP
+          WARNING: module compatibility and device boot compatibility are not yet verified.
+          Back up the current boot image before any installation attempt.
+          EOF
+
+          ZIP_NAME="AnyKernel3-Tanzanite-${FEATURE_TAG}-${KERNEL_VERSION}.zip"
+          ZIP_PATH="$GITHUB_WORKSPACE/$ZIP_NAME"
+
+          cd "$AK3"
+
+          zip -r9 "$ZIP_PATH" . \
+            -x ".git" ".git/*" ".github/*" "README.md" "*.placeholder"
+
+          unzip -tq "$ZIP_PATH"
+
+          unzip -l "$ZIP_PATH" | grep -E \
+            'Image\.gz|anykernel\.sh|META-INF/com/google/android/update-binary'
+
+          echo "zip_path=$ZIP_PATH" >> "$GITHUB_OUTPUT"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+
+          echo "Created experimental package: $ZIP_PATH"
+
+      - name: Show build outputs
+        if: always()
+        shell: bash
+        run: |
+          echo "Kernel output files:"
+          find "$GITHUB_WORKSPACE/kernel-out" \
+            -type f \
+            \( -name 'Image' \
+            -o -name 'Image.gz' \
+            -o -name 'vmlinux' \
+            -o -name 'System.map' \
+            -o -name '*.ko' \
+            -o -name '*.dtb' \
+            -o -name '*.dtbo' \
+            -o -name '.config' \) \
+            -printf '%p (%s bytes)\n' || true
+
+          echo
+          echo "Generated AnyKernel3 ZIPs:"
+          find "$GITHUB_WORKSPACE" -maxdepth 1 \
+            -type f -name 'AnyKernel3-Tanzanite-*.zip' \
+            -printf '%p (%s bytes)\n' || true
+
+      - name: Upload kernel and config artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-${{ steps.kernel.outputs.version }}
+          if-no-files-found: warn
+          path: |
+            kernel-out/**
+            kernel-config
+            kernel-config-before-ntsync
+            kernel-config-diff.txt
+
+      - name: Upload AnyKernel3 ZIP
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3-Tanzanite-${{ steps.kernel.outputs.version }}
+          if-no-files-found: error
+          path: AnyKernel3-Tanzanite-*.zip
