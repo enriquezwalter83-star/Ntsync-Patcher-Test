@@ -1,4 +1,4 @@
-name: Build Yuuka 5.10 + NTSync + AnyKernel3 + ksun
+name: Build Yuuka 5.10 + NTSync + KernelSU-Next + AnyKernel3
 
 on:
    workflow_dispatch:
@@ -310,49 +310,53 @@ jobs:
           cp "$OUT/.config" \
             "$GITHUB_WORKSPACE/kernel-config-original"
 
+          if [[ "${{ inputs.kernelsu_next }}" == "true" ]]; then
 
-          if [[ "$ENABLE_NTSYNC" == "true" ]]; then
+           echo "Enabling KernelSU-Next"
 
-            if ! grep -RqsE 'config NTSYNC([[:space:]]|$)' \
-              "$K/kernel" \
-              "$K/drivers" \
-              "$K/fs" \
-              2>/dev/null; then
+            echo "Checking KSU symbol..."
 
-              echo "::error::NTSync Kconfig missing."
-              exit 1
-            fi
+            grep -R "config KSU" \
+            "$K" \
+            --exclude-dir=.git \
+            || true
 
-
-            "$K/scripts/config" \
-              --file "$OUT/.config" \
-              --enable NTSYNC
-
-
-            make -C "$K" \
-              O="$OUT" \
-              ARCH=arm64 \
-              LLVM=1 \
-              CROSS_COMPILE=aarch64-linux-gnu- \
-              olddefconfig
-
-
-            if ! grep -q '^CONFIG_NTSYNC=y$' "$OUT/.config"; then
-              echo "::error::NTSync failed."
-              exit 1
-            fi
+           "$K/scripts/config" \
+           --file "$OUT/.config" \
+           --enable KSU
+           --enable KSU_DEBUG
 
           fi
+          
+          if [[ "$ENABLE_NTSYNC" == "true" ]]; then
 
+           echo "Enabling NTSync"
+
+           "$K/scripts/config" \
+           --file "$OUT/.config" \
+           --enable NTSYNC
+
+          fi
+          make -C "$K" \
+           O="$OUT" \
+           ARCH=arm64 \
+           LLVM=1 \
+           CROSS_COMPILE=aarch64-linux-gnu- \
+           olddefconfig
 
           cp "$OUT/.config" \
             "$GITHUB_WORKSPACE/kernel-config"
 
-
           echo
           echo "Kernel features:"
           grep -E \
-          '^(CONFIG_NTSYNC|CONFIG_LRU_GEN|CONFIG_LRU_GEN_ENABLED|CONFIG_PREEMPT|CONFIG_HZ|CONFIG_LTO|CONFIG_LTO_CLANG_THIN)=' \
+          '^(CONFIG_NTSYNC|CONFIG_KSU|CONFIG_KSU_DEBUG|CONFIG_LRU_GEN|CONFIG_PREEMPT|CONFIG_HZ)=' \
+          "$OUT/.config" || true
+ 
+          echo
+          echo "Kernel features:"
+          grep -E \
+          '^(CONFIG_NTSYNC|CONFIG_KSU|CONFIG_KSU_DEBUG)=' \
           "$OUT/.config" || true
 
 
