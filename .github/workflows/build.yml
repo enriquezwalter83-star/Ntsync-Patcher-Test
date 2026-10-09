@@ -75,7 +75,7 @@ jobs:
 
           repo init \
             -u https://android.googlesource.com/kernel/manifest \
-            -b android12-5.10 \
+            -b common-android12-5.10 \
             --depth=1
 
           repo sync -c -j2
