@@ -1,6 +1,6 @@
 name: Android Common GKI 5.10 + NTSync
 
-'on:
+'on':
 workflow_dispatch:
 inputs:
 kernel_release:
