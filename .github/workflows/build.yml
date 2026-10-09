@@ -322,9 +322,8 @@ jobs:
             || true
 
            "$K/scripts/config" \
-           --file "$OUT/.config" \
-           --enable KSU
-           --enable KSU_DEBUG
+             --file "$OUT/.config" \
+             --enable KSU   
 
           fi
           
