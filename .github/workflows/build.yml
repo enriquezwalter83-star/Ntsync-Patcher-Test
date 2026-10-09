@@ -1,11 +1,11 @@
 
-name: Android GKI 5.10 Common Build
+name: NTSync Patch Test
 
 on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: "URL del repositorio Common Source"
+        description: "Repositorio Android Common Source"
         required: true
         type: string
         default: "https://android.googlesource.com/kernel/common"
@@ -16,204 +16,134 @@ on:
         type: string
         default: "android12-5.10.269_r00"
 
-      ntsync:
-        description: "Aplicar parches NTSync"
-        required: true
-        type: boolean
-        default: false
-
-permissions:
-  contents: read
-
 jobs:
-  build:
-    name: Build GKI ARM64
+  test-patch:
+    name: Clone and test NTSync patch
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout builder
+      - name: Checkout main branch
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
+
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential curl flex git \
-            libelf-dev libssl-dev python3 python3-dev \
-            rsync unzip zip cpio kmod pahole \
-            perl libncurses-dev
+            git python3 build-essential \
+            bc bison flex libelf-dev libssl-dev
 
-      - name: Install repo tool
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/bin"
-          curl -fsSL \
-            https://storage.googleapis.com/git-repo-downloads/repo \
-            -o "$HOME/bin/repo"
-          chmod +x "$HOME/bin/repo"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
-
-      - name: Initialize Android build environment
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/kernel"
-          cd "$GITHUB_WORKSPACE/kernel"
-
-          repo init \
-            -u https://android.googlesource.com/kernel/manifest \
-            -b common-android12-5.10 \
-            --depth=1
-
-          repo sync -c -j2
-
-          test -f build/build.sh
-          test -f common/build.config.gki.aarch64
-
-      - name: Select Common Source revision
-        shell: bash
+      - name: Clone Android Common Source
         env:
           KERNEL_REPO: ${{ inputs.kernel_repo }}
           KERNEL_REF: ${{ inputs.kernel_ref }}
+        shell: bash
         run: |
           set -euo pipefail
 
-          K="$GITHUB_WORKSPACE/kernel/common"
+          mkdir -p "$GITHUB_WORKSPACE/kernel/common"
+          cd "$GITHUB_WORKSPACE/kernel/common"
 
-          if [[ -z "$KERNEL_REPO" || -z "$KERNEL_REF" ]]; then
-            echo "::error::Repository and reference are required"
-            exit 1
-          fi
+          git init
+          git remote add origin "$KERNEL_REPO"
 
-          echo "Repository: $KERNEL_REPO"
-          echo "Reference: $KERNEL_REF"
+          TAG_REF="refs/tags/$KERNEL_REF"
+          BRANCH_REF="refs/heads/$KERNEL_REF"
 
-          if git ls-remote --exit-code --tags \
-            "$KERNEL_REPO" "refs/tags/$KERNEL_REF" \
-            >/dev/null 2>&1; then
+          if git ls-remote --exit-code --refs origin \
+            "$TAG_REF" >/dev/null 2>&1; then
 
-            git -C "$K" fetch --depth=1 \
-              "$KERNEL_REPO" "refs/tags/$KERNEL_REF"
+            echo "Found tag: $KERNEL_REF"
+            git fetch --depth=1 origin "$TAG_REF"
+            git checkout --detach FETCH_HEAD
 
-            git -C "$K" checkout --detach FETCH_HEAD
+          elif git ls-remote --exit-code --heads origin \
+            "$KERNEL_REF" >/dev/null 2>&1; then
 
-          elif git ls-remote --exit-code --heads \
-            "$KERNEL_REPO" "refs/heads/$KERNEL_REF" \
-            >/dev/null 2>&1; then
-
-            git -C "$K" fetch --depth=1 \
-              "$KERNEL_REPO" "refs/heads/$KERNEL_REF"
-
-            git -C "$K" checkout -B selected-kernel FETCH_HEAD
+            echo "Found branch: $KERNEL_REF"
+            git fetch --depth=1 origin "$BRANCH_REF"
+            git checkout -B test-kernel FETCH_HEAD
 
           else
-            echo "::error::Tag or branch not found"
+            echo "::error::Kernel tag or branch not found"
+            echo "Repository: $KERNEL_REPO"
+            echo "Reference: $KERNEL_REF"
             exit 1
           fi
 
-          echo "Commit:"
-          git -C "$K" rev-parse HEAD
+          echo "===== Kernel revision ====="
+          git log -1 --format='%H%n%s'
 
-          echo "Kernel version:"
-          make -s -C "$K" kernelversion
+          echo "===== Kernel version ====="
+          make -s kernelversion
 
-      - name: Apply NTSync patches
-        if: ${{ inputs.ntsync }}
+      - name: Check NTSync patcher
         shell: bash
         run: |
           set -euo pipefail
 
           if [[ ! -f scripts/apply_ntsync.sh ]]; then
-            echo "::error::Missing scripts/apply_ntsync.sh"
+            echo "::error::scripts/apply_ntsync.sh not found in main"
             exit 1
           fi
 
-          chmod +x scripts/apply_ntsync.sh
+          echo "NTSync patcher found."
+
+      - name: Apply NTSync patch
+        shell: bash
+        run: |
+          set -euo pipefail
 
           KVER="$(make -s -C kernel/common kernelversion)"
 
+          chmod +x scripts/apply_ntsync.sh
+
+          echo "===== Applying NTSync ====="
+          echo "Kernel version: $KVER"
+
           scripts/apply_ntsync.sh \
-            kernel/common "$KVER"
+            kernel/common \
+            "$KVER"
 
-      - name: Enable NTSync
-        if: ${{ inputs.ntsync }}
+      - name: Verify patch changes
         shell: bash
         run: |
           set -euo pipefail
 
-          CONFIG="kernel/common/arch/arm64/configs/gki_defconfig"
+          cd kernel/common
 
-          if [[ ! -f "$CONFIG" ]]; then
-            echo "::error::gki_defconfig not found"
+          echo "===== Patch whitespace validation ====="
+          git diff --check
+
+          echo "===== Changed files ====="
+          git status --short
+
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "::error::No source changes detected after patching"
             exit 1
           fi
 
-          if ! grep -Rqs 'config NTSYNC' \
-            kernel/common/drivers \
-            kernel/common/kernel \
-            kernel/common/fs \
-            kernel/common/ipc \
-            kernel/common/init 2>/dev/null; then
-            echo "::error::NTSync Kconfig entry not found"
-            exit 1
-          fi
+          echo "===== Patch summary ====="
+          git diff --stat
 
-          sed -i \
-            -e '/^CONFIG_NTSYNC=/d' \
-            -e '/^# CONFIG_NTSYNC is not set$/d' \
-            "$CONFIG"
+          echo "===== NTSync patch test passed ====="
+          echo "Changes were detected and git diff --check passed."
+          echo "No kernel compilation was performed."
 
-          printf '\nCONFIG_NTSYNC=y\n' >> "$CONFIG"
-
-      - name: Compile GKI kernel
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel"
-
-          export OUT_DIR="$GITHUB_WORKSPACE/kernel-out"
-          export DIST_DIR="$GITHUB_WORKSPACE/kernel-dist"
-
-          BUILD_CONFIG=common/build.config.gki.aarch64 \
-            build/build.sh -j"$(nproc)"
-
-      - name: Verify artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          DIST="$GITHUB_WORKSPACE/kernel-dist"
-
-          if [[ ! -d "$DIST" ]]; then
-            echo "::error::DIST_DIR was not created"
-            exit 1
-          fi
-
-          if ! find "$DIST" -type f -print -quit | grep -q .; then
-            echo "::error::No artifacts generated"
-            exit 1
-          fi
-
-          find "$DIST" -maxdepth 2 -type f -print | sort
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: gki-common-${{ inputs.kernel_ref }}
-          path: kernel-dist/
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Build summary
+      - name: Final summary
         if: always()
         shell: bash
         run: |
-          echo "Workflow finished."
-          if [[ -f kernel/common/Makefile ]]; then
-            make -s -C kernel/common kernelversion || true
-            git -C kernel/common rev-parse HEAD || true
-          fi
+          echo "================================"
+          echo "NTSync PATCH TEST"
+          echo "================================"
+          echo "Branch: main"
+          echo "Kernel source: ${{ inputs.kernel_repo }}"
+          echo "Kernel reference: ${{ inputs.kernel_ref }}"
+          echo "Compilation: disabled"
+          echo "Flashing: not performed"
