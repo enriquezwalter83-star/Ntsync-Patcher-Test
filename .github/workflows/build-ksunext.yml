@@ -1,4 +1,4 @@
-name: Build Yuuka 5.10 + NTSync + AnyKernel3
+name: Build Yuuka 5.10 + NTSync + AnyKernel3 + ksun
 
 'on':
    workflow_dispatch:
