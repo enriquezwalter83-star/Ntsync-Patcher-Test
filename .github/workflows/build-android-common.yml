@@ -1,21 +1,14 @@
-name: Android Common GKI 5.10 + NTSync
+name: Android Common GKI 5.10 NTSync
 
 'on':
   workflow_dispatch:
     inputs:
       kernel_release:
-        description: 'Version de Android Common GKI 5.10'
+        description: 'Rama del kernel Android Common'
         required: true
         type: choice
         options:
-          - android12-5.10-2025-12_r1
-          - android12-5.10-2025-09_r2
-          - android12-5.10-2025-05_r1
-      custom_tag:
-        description: 'Nombre personalizado del artefacto'
-        required: false
-        type: string
-        default: ''
+          - common-android12-5.10
       ntsync:
         description: 'Aplicar parches NTSync'
         required: true
@@ -23,178 +16,79 @@ name: Android Common GKI 5.10 + NTSync
         default: true
 
 permissions:
-contents: read
-
-concurrency:
-group: android-common-gki-${{ github.ref }}
-cancel-in-progress: true
+  contents: read
 
 jobs:
-build:
-name: Build Android Common GKI 5.10
-runs-on: ubuntu-22.04
-timeout-minutes: 360
+  build:
+    name: Build Android Common GKI
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
 
-steps:
-  - name: Descargar este repositorio
-    uses: actions/checkout@v4
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
 
-  - name: Instalar dependencias
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y \
-        bc \
-        bison \
-        build-essential \
-        ca-certificates \
-        cpio \
-        curl \
-        flex \
-        git \
-        libelf-dev \
-        libncurses-dev \
-        libssl-dev \
-        lz4 \
-        make \
-        python3 \
-        python3-pip \
-        rsync \
-        unzip \
-        zip
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libncurses-dev libssl-dev lz4 make python3 rsync curl
 
-  - name: Instalar herramienta repo
-    run: |
-      mkdir -p "$HOME/.bin"
-      curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo \
-        -o "$HOME/.bin/repo"
-      chmod +x "$HOME/.bin/repo"
-      echo "$HOME/.bin" >> "$GITHUB_PATH"
+      - name: Instalar repo
+        run: |
+          mkdir -p "$HOME/.bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/.bin/repo"
+          chmod +x "$HOME/.bin/repo"
+          echo "$HOME/.bin" >> "$GITHUB_PATH"
 
-  - name: Descargar Android Common
-    env:
-      KERNEL_RELEASE: ${{ inputs.kernel_release }}
-    run: |
-      set -euo pipefail
+      - name: Descargar Android Common
+        env:
+          KERNEL_BRANCH: ${{ inputs.kernel_release }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/kernel-src"
+          cd "$GITHUB_WORKSPACE/kernel-src"
+          repo init -u https://android.googlesource.com/kernel/manifest -b "$KERNEL_BRANCH"
+          repo sync -c -j2 --no-clone-bundle
 
-      mkdir -p "$GITHUB_WORKSPACE/kernel-src"
-      cd "$GITHUB_WORKSPACE/kernel-src"
+      - name: Verificar archivos
+        working-directory: kernel-src
+        run: |
+          set -euo pipefail
+          test -f common/Makefile
+          test -f build/build.sh
+          test -f common/build.config.gki.aarch64
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' common/Makefile
 
-      repo init \
-        -u https://android.googlesource.com/kernel/manifest \
-        -b "$KERNEL_RELEASE"
+      - name: Aplicar parches NTSync
+        if: ${{ inputs.ntsync }}
+        env:
+          KERNEL_DIR: ${{ github.workspace }}/kernel-src/common
+        run: |
+          set -euo pipefail
+          test -f scripts/apply_ntsync.sh
+          bash scripts/apply_ntsync.sh
 
-      repo sync -c -j"$(nproc)" --no-clone-bundle
+      - name: Compilar kernel
+        working-directory: kernel-src
+        env:
+          BUILD_CONFIG: common/build.config.gki.aarch64
+          OUT_DIR: ${{ github.workspace }}/kernel-src/out
+        run: |
+          set -euo pipefail
+          build/build.sh
 
-      echo "Contenido descargado:"
-      ls -la
+      - name: Preparar artefactos
+        working-directory: kernel-src
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist-artifacts"
+          find out -type f \( -name Image -o -name Image.gz -o -name Image.lz4 -o -name '*.dtb' -o -name '*.dtbo' \) -exec cp --parents '{}' "$GITHUB_WORKSPACE/dist-artifacts/" \;
+          test -n "$(find "$GITHUB_WORKSPACE/dist-artifacts" -type f -print -quit)"
 
-  - name: Verificar versión del kernel
-    working-directory: kernel-src
-    run: |
-      set -euo pipefail
-
-      if [ ! -f common/Makefile ]; then
-        echo "::error::No se encontró common/Makefile."
-        exit 1
-      fi
-
-      grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' common/Makefile
-
-      VERSION=$(sed -n 's/^VERSION = //p' common/Makefile)
-      PATCHLEVEL=$(sed -n 's/^PATCHLEVEL = //p' common/Makefile)
-
-      if [ "$VERSION" != "5" ] || [ "$PATCHLEVEL" != "10" ]; then
-        echo "::error::La versión descargada no es Linux 5.10."
-        exit 1
-      fi
-
-  - name: Aplicar parches NTSync
-    if: ${{ inputs.ntsync }}
-    env:
-      KERNEL_DIR: ${{ github.workspace }}/kernel-src/common
-    run: |
-      set -euo pipefail
-
-      if [ ! -f scripts/apply_ntsync.sh ]; then
-        echo "::error::No existe scripts/apply_ntsync.sh en este repositorio."
-        exit 1
-      fi
-
-      bash scripts/apply_ntsync.sh
-
-  - name: Activar configuración NTSync
-    if: ${{ inputs.ntsync }}
-    working-directory: kernel-src
-    run: |
-      set -euo pipefail
-
-      CONFIG="common/arch/arm64/configs/gki_defconfig"
-
-      if [ ! -f "$CONFIG" ]; then
-        echo "::error::No se encontró $CONFIG."
-        exit 1
-      fi
-
-      if ! grep -q '^CONFIG_NTSYNC=' "$CONFIG"; then
-        echo 'CONFIG_NTSYNC=y' >> "$CONFIG"
-      else
-        sed -i 's/^CONFIG_NTSYNC=.*/CONFIG_NTSYNC=y/' "$CONFIG"
-      fi
-
-      grep -n 'CONFIG_NTSYNC' "$CONFIG"
-
-  - name: Verificar archivos de compilación
-    working-directory: kernel-src
-    run: |
-      set -euo pipefail
-
-      if [ ! -f build/build.sh ]; then
-        echo "::error::No se encontró build/build.sh."
-        exit 1
-      fi
-
-      if [ ! -f common/build.config.gki.aarch64 ]; then
-        echo "::error::No se encontró common/build.config.gki.aarch64."
-        exit 1
-      fi
-
-  - name: Compilar kernel
-    working-directory: kernel-src
-    env:
-      BUILD_CONFIG: common/build.config.gki.aarch64
-      OUT_DIR: ${{ github.workspace }}/kernel-src/out
-    run: |
-      set -euo pipefail
-
-      build/build.sh
-
-  - name: Preparar artefactos
-    working-directory: kernel-src
-    run: |
-      set -euo pipefail
-
-      mkdir -p "$GITHUB_WORKSPACE/dist-artifacts"
-
-      find out -type f \
-        \( -name 'Image' \
-        -o -name 'Image.gz' \
-        -o -name 'Image.lz4' \
-        -o -name '*.dtb' \
-        -o -name '*.dtbo' \
-        -o -name '*.ko' \
-        -o -name '*.zip' \) \
-        -exec cp --parents '{}' "$GITHUB_WORKSPACE/dist-artifacts/" \;
-
-      if [ -z "$(find "$GITHUB_WORKSPACE/dist-artifacts" -type f -print -quit)" ]; then
-        echo "::error::No se encontraron artefactos de compilación."
-        find out -maxdepth 4 -type f | head -100
-        exit 1
-      fi
-
-  - name: Subir artefactos
-    uses: actions/upload-artifact@v4
-    with:
-      name: ${{ inputs.custom_tag != '' && inputs.custom_tag || inputs.kernel_release }}-gki-5.10
-      path: dist-artifacts/
-      if-no-files-found: error
-      retention-days: 7
+      - name: Subir artefactos
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-common-gki-5.10
+          path: dist-artifacts/
+          if-no-files-found: error
+          retention-days: 7
