@@ -183,5 +183,161 @@ jobs:
 
 
           echo "Repository: $KERNEL_URL"
-          echo "Reference: $KERNEL_REF"
+          echo "Reference: $KERNEL_REF"                                                                
+      
+      - name: Clone kernel
+        id: kernel
+        shell: bash
+        env:
+          KERNEL_REPO: ${{ steps.source.outputs.url }}
+          KERNEL_REF: ${{ steps.source.outputs.ref }}
+        run: |
+          set -euo pipefail
+
+          K="$GITHUB_WORKSPACE/kernel-source"
+
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "$KERNEL_REF" \
+            "$KERNEL_REPO" "$K"
+
+          if [[ ! -f "$K/Makefile" ]]; then
+            echo "::error::Kernel Makefile not found."
+            exit 1
+          fi
+
+          VERSION="$(make -s -C "$K" kernelversion)"
+          COMMIT="$(git -C "$K" rev-parse HEAD)"
+
+          if [[ ! "$VERSION" =~ ^5\.10\.[0-9]+([+-].*)?$ ]]; then
+            echo "::error::Only Linux 5.10.x is supported. Detected: $VERSION"
+            exit 1
+          fi
+
+          echo "dir=$K" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+          echo "Kernel version: $VERSION"
+          echo "Kernel commit: $COMMIT"
+
+
+      - name: Apply NTSync patches
+        if: ${{ inputs.ntsync }}
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+          KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          SCRIPT="$GITHUB_WORKSPACE/scripts/apply_ntsync.sh"
+
+          if [[ ! -f "$SCRIPT" ]]; then
+            echo "::error::Missing NTSync patch script."
+            exit 1
+          fi
+
+          bash "$SCRIPT" "$KERNEL_DIR" "$KERNEL_VERSION"
+
+
+      - name: Prepare original Yuuka config + NTSync
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+          ENABLE_NTSYNC: ${{ inputs.ntsync }}
+        run: |
+          set -euo pipefail
+
+          K="$KERNEL_DIR"
+          OUT="$GITHUB_WORKSPACE/kernel-out"
+
+          mkdir -p "$OUT"
+
+          #
+          # IMPORTANTE:
+          # Usamos el defconfig original del source.
+          # No activamos LRU, sched, governors, etc.
+          # Todo lo que Yuuka tenga queda intacto.
+          #
+
+          if [[ -f "$K/arch/arm64/configs/gki_defconfig" ]]; then
+            DEFCONFIG="gki_defconfig"
+          elif [[ -f "$K/arch/arm64/configs/defconfig" ]]; then
+            DEFCONFIG="defconfig"
+          else
+            echo "::error::No ARM64 defconfig found."
+            exit 1
+          fi
+
+
+          echo "Using source defconfig: $DEFCONFIG"
+
+
+          make -C "$K" \
+            O="$OUT" \
+            ARCH=arm64 \
+            LLVM=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            "$DEFCONFIG"
+
+
+          cp "$OUT/.config" \
+            "$GITHUB_WORKSPACE/kernel-config-original"
+
+
+          if [[ "$ENABLE_NTSYNC" == "true" ]]; then
+
+            if ! grep -RqsE 'config NTSYNC([[:space:]]|$)' \
+              "$K/kernel" \
+              "$K/drivers" \
+              "$K/fs" \
+              2>/dev/null; then
+
+              echo "::error::NTSync Kconfig missing."
+              exit 1
+            fi
+
+
+            "$K/scripts/config" \
+              --file "$OUT/.config" \
+              --enable NTSYNC
+
+
+            make -C "$K" \
+              O="$OUT" \
+              ARCH=arm64 \
+              LLVM=1 \
+              CROSS_COMPILE=aarch64-linux-gnu- \
+              olddefconfig
+
+
+            if ! grep -q '^CONFIG_NTSYNC=y$' "$OUT/.config"; then
+              echo "::error::NTSync failed."
+              exit 1
+            fi
+
+          fi
+
+
+          cp "$OUT/.config" \
+            "$GITHUB_WORKSPACE/kernel-config"
+
+
+          echo
+          echo "Kernel features:"
+          grep -E \
+          '^(CONFIG_NTSYNC|CONFIG_LRU_GEN|CONFIG_LRU_GEN_ENABLED|CONFIG_PREEMPT|CONFIG_HZ|CONFIG_LTO|CONFIG_LTO_CLANG_THIN)=' \
+          "$OUT/.config" || true
+
+
+          if [[ -x "$K/scripts/diffconfig" ]]; then
+
+            "$K/scripts/diffconfig" \
+              "$GITHUB_WORKSPACE/kernel-config-original" \
+              "$GITHUB_WORKSPACE/kernel-config" \
+              > "$GITHUB_WORKSPACE/kernel-config-diff.txt" || true
+
+          fi
           
