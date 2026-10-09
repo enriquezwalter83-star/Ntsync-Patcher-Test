@@ -35,7 +35,6 @@ name: Build Android Common GKI 5.10
 runs-on: ubuntu-22.04
 timeout-minutes: 360
 
-```
 steps:
   - name: Descargar este repositorio
     uses: actions/checkout@v4
@@ -199,4 +198,3 @@ steps:
       path: dist-artifacts/
       if-no-files-found: error
       retention-days: 7
-```
