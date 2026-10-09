@@ -13,9 +13,8 @@ options:
 - android12-5.10-2025-09_r2
 - android12-5.10-2025-05_r1
 
-```
-  custom_tag:
-    description: "Tag personalizada opcional; si se completa, reemplaza la selección anterior"
+custom_tag:
+    description: "Tag personalizada opcional"
     required: false
     type: string
     default: ""
@@ -25,7 +24,6 @@ options:
     required: true
     type: boolean
     default: true
-```
 
 permissions:
 contents: read
@@ -40,7 +38,6 @@ name: Build Android Common 5.10 ARM64
 runs-on: ubuntu-22.04
 timeout-minutes: 360
 
-```
 steps:
   - name: Checkout patcher
     uses: actions/checkout@v4
@@ -176,7 +173,6 @@ steps:
 
       if [[ ! -f build/build.sh ]]; then
         echo "::error::Android kernel build/build.sh is missing."
-        echo "The checked-out manifest may not provide the expected legacy build system."
         exit 1
       fi
 
@@ -220,7 +216,7 @@ steps:
           \( -name 'Image' -o -name 'Image.gz' \
              -o -name 'Image.lz4' -o -name 'boot.img' \) \
           -print -quit | grep -q .; then
-        echo "::error::Build completed but no expected kernel image was found in dist/."
+        echo "::error::No expected kernel image found in dist/."
         exit 1
       fi
 
@@ -258,5 +254,3 @@ steps:
         out/**/System.map
         out/**/.config
         build-info.txt
-```
-
