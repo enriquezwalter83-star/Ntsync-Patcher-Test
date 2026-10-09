@@ -72,28 +72,39 @@ jobs:
           echo "Android kernel config:"
           grep -E '^(CONFIG_ANDROID|CONFIG_GKI|CONFIG_NTSYNC)=' .config 2>/dev/null || true
 
-
-      - name: Diagnose NTSync compatibility
+      - name: Diagnose NTSync patch context
         if: ${{ inputs.ntsync }}
+        shell: bash
         run: |
-          set -euo pipefail
+          set -u
 
-          echo "===== Kernel version ====="
-          make -s -C kernel/common kernelversion
+          K=kernel/common
+          P="$GITHUB_WORKSPACE/patches/ntsync/android12-5.10/ntsync_compat_android12-5.10.patch"
 
-          echo ""
-          echo "===== Compatibility patch check ====="
-          git -C kernel/common apply --check \
-            "$GITHUB_WORKSPACE/patches/ntsync/android12-5.10/ntsync_compat_android12-5.10.patch" \
-            || true
+          echo "===== Kernel identity ====="
+          git -C "$K" log -1 --format='%H %s'
+          make -s -C "$K" kernelversion
 
           echo ""
-          echo "===== Reverse check ====="
-          git -C kernel/common apply --reverse --check \
-            "$GITHUB_WORKSPACE/patches/ntsync/android12-5.10/ntsync_compat_android12-5.10.patch" \
-            || true
+          echo "===== Patch metadata ====="
+          git diff --no-index -- /dev/null "$P" | head -n 100 || true
 
+          echo ""
+          echo "===== Patch hunks ====="
+          grep -nE '^(diff --git|index |--- |\+\+\+ |@@)' "$P" || true
 
+          echo ""
+          echo "===== Relevant source locations ====="
+          grep -nE 'config MISC|obj-.*MISC|lockdep_assert|__lock_is_held|LOCK_STATE_' \
+            "$K/drivers/misc/Kconfig" \
+            "$K/drivers/misc/Makefile" \
+            "$K/include/linux/lockdep.h" \
+            "$K/kernel/locking/lockdep.c" || true
+
+          echo ""
+          echo "===== Whitespace and patch integrity ====="
+          git -C "$K" apply --check --verbose "$P" || true
+      
       - name: Apply NTSync
         if: ${{ inputs.ntsync }}
         env:
