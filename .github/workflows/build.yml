@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - yuuka
+          - yuuka-fork
           - android-common
           - custom
         default: yuuka
@@ -82,6 +83,10 @@ jobs:
             yuuka)
               DEFAULT_URL="https://github.com/MillenniumOSS/android_kernel_common_android12-5.10.git"
               DEFAULT_REF="yuuka-main"
+              ;;
+            yuuka-fork)
+              DEFAULT_URL="https://github.com/enriquezwalter83-star/android_kernel_common_android12-5.10.git"
+              DEFAULT_REF="millennium-base"
               ;;
             android-common)
               DEFAULT_URL="https://android.googlesource.com/kernel/common"
