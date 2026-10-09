@@ -1,1 +1,329 @@
+name: GitHub Sources Kernel Builder
+
+on:
+workflow_dispatch:
+inputs:
+kernel_source:
+description: "Repositorio de origen"
+required: true
+type: choice
+options:
+- yuuka
+- custom
+default: yuuka
+
+```
+  repository_url:
+    description: "URL GitHub del kernel (obligatoria para custom)"
+    required: false
+    type: string
+    default: ""
+
+  kernel_ref:
+    description: "Rama o tag del kernel"
+    required: true
+    type: string
+    default: yuuka-main
+
+  ntsync:
+    description: "Aplicar parches y habilitar NTSync"
+    required: true
+    type: boolean
+    default: true
+```
+
+permissions:
+contents: read
+
+concurrency:
+group: github-kernel-${{ github.ref }}
+cancel-in-progress: false
+
+jobs:
+build:
+name: Clone, patch and compile ARM64
+runs-on: ubuntu-24.04
+timeout-minutes: 360
+
+```
+steps:
+  - name: Checkout patcher
+    uses: actions/checkout@v4
+
+  - name: Install build dependencies
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      sudo apt-get update
+      sudo apt-get install -y \
+        bc bison build-essential cpio flex \
+        gcc-aarch64-linux-gnu \
+        binutils-aarch64-linux-gnu \
+        clang llvm lld \
+        libelf-dev libssl-dev libncurses-dev \
+        pahole python3 rsync git \
+        zstd lz4
+
+      echo "Clang version:"
+      clang --version
+      echo "LLD version:"
+      ld.lld --version
+
+  - name: Select GitHub source
+    id: source
+    shell: bash
+    env:
+      SELECTED_SOURCE: ${{ inputs.kernel_source }}
+      CUSTOM_URL: ${{ inputs.repository_url }}
+      REQUESTED_REF: ${{ inputs.kernel_ref }}
+    run: |
+      set -euo pipefail
+
+      case "$SELECTED_SOURCE" in
+        yuuka)
+          DEFAULT_URL="https://github.com/MillenniumOSS/android_kernel_common_android12-5.10.git"
+          ;;
+        custom)
+          DEFAULT_URL=""
+          ;;
+        *)
+          echo "::error::Unknown source selection."
+          exit 1
+          ;;
+      esac
+
+      if [[ "$SELECTED_SOURCE" == "custom" ]]; then
+        KERNEL_URL="${CUSTOM_URL//[[:space:]]/}"
+      else
+        KERNEL_URL="$DEFAULT_URL"
+      fi
+
+      KERNEL_REF="${REQUESTED_REF//[[:space:]]/}"
+
+      if [[ -z "$KERNEL_URL" ]]; then
+        echo "::error::Enter a GitHub repository URL for custom source."
+        exit 1
+      fi
+
+      if [[ -z "$KERNEL_REF" ]]; then
+        echo "::error::Enter a branch or tag."
+        exit 1
+      fi
+
+      if [[ ! "$KERNEL_URL" =~ ^https://github\.com/[^[:space:]]+\.git$ ]]; then
+        echo "::error::Use a GitHub HTTPS Git URL ending in .git."
+        exit 1
+      fi
+
+      echo "url=$KERNEL_URL" >> "$GITHUB_OUTPUT"
+      echo "ref=$KERNEL_REF" >> "$GITHUB_OUTPUT"
+
+      echo "Repository: $KERNEL_URL"
+      echo "Reference: $KERNEL_REF"
+
+  - name: Clone kernel source
+    id: kernel
+    shell: bash
+    env:
+      KERNEL_REPO: ${{ steps.source.outputs.url }}
+      KERNEL_REF: ${{ steps.source.outputs.ref }}
+    run: |
+      set -euo pipefail
+
+      K="$GITHUB_WORKSPACE/kernel-source"
+
+      git clone \
+        --depth=1 \
+        --single-branch \
+        --branch "$KERNEL_REF" \
+        "$KERNEL_REPO" \
+        "$K"
+
+      if [[ ! -f "$K/Makefile" ]]; then
+        echo "::error::No Makefile found at the repository root."
+        exit 1
+      fi
+
+      VERSION="$(make -s -C "$K" kernelversion)"
+      echo "Detected kernel version: $VERSION"
+
+      if [[ ! "$VERSION" =~ ^5\.10\.[0-9]+([+-].*)?$ ]]; then
+        echo "::error::This workflow currently supports Linux 5.10.x only."
+        echo "::error::Detected version: $VERSION"
+        exit 1
+      fi
+
+      echo "dir=$K" >> "$GITHUB_OUTPUT"
+      echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      echo "commit=$(git -C "$K" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      echo "Checked-out commit:"
+      git -C "$K" log -1 --oneline
+
+  - name: Apply NTSync patches
+    if: ${{ inputs.ntsync }}
+    shell: bash
+    env:
+      KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+      KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+    run: |
+      set -euo pipefail
+
+      SCRIPT="$GITHUB_WORKSPACE/scripts/apply_ntsync.sh"
+
+      if [[ ! -f "$SCRIPT" ]]; then
+        echo "::error::scripts/apply_ntsync.sh not found."
+        exit 1
+      fi
+
+      bash "$SCRIPT" "$KERNEL_DIR" "$KERNEL_VERSION"
+
+  - name: Configure ARM64 kernel
+    shell: bash
+    env:
+      KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+      ENABLE_NTSYNC: ${{ inputs.ntsync }}
+    run: |
+      set -euo pipefail
+
+      K="$KERNEL_DIR"
+      OUT="$GITHUB_WORKSPACE/kernel-out"
+      mkdir -p "$OUT"
+
+      if [[ -f "$K/arch/arm64/configs/gki_defconfig" ]]; then
+        DEFCONFIG="gki_defconfig"
+      elif [[ -f "$K/arch/arm64/configs/defconfig" ]]; then
+        DEFCONFIG="defconfig"
+      else
+        echo "::error::No gki_defconfig or defconfig found."
+        exit 1
+      fi
+
+      echo "Using configuration: $DEFCONFIG"
+
+      make -C "$K" \
+        O="$OUT" \
+        ARCH=arm64 \
+        LLVM=1 \
+        LLVM_IAS=1 \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        "$DEFCONFIG"
+
+      if [[ "$ENABLE_NTSYNC" == "true" ]]; then
+        if ! grep -RqsE 'config NTSYNC([[:space:]]|$)' \
+            "$K/drivers" "$K/kernel" "$K/fs" "$K/arch/arm64" \
+            2>/dev/null; then
+          echo "::error::NTSYNC Kconfig entry not found."
+          exit 1
+        fi
+
+        "$K/scripts/config" \
+          --file "$OUT/.config" \
+          --enable NTSYNC
+
+        make -C "$K" \
+          O="$OUT" \
+          ARCH=arm64 \
+          LLVM=1 \
+          LLVM_IAS=1 \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          olddefconfig
+
+        if ! grep -q '^CONFIG_NTSYNC=y$' "$OUT/.config"; then
+          echo "::error::CONFIG_NTSYNC=y was not retained."
+          exit 1
+        fi
+      fi
+
+      cp "$OUT/.config" "$GITHUB_WORKSPACE/kernel-config"
+
+  - name: Compile kernel
+    shell: bash
+    env:
+      KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+    run: |
+      set -euo pipefail
+
+      K="$KERNEL_DIR"
+      OUT="$GITHUB_WORKSPACE/kernel-out"
+      JOBS="$(nproc)"
+
+      echo "Compiling Linux 5.10 for ARM64"
+      echo "Compiler:"
+      clang --version
+      echo "Parallel jobs: $JOBS"
+
+      make -C "$K" \
+        O="$OUT" \
+        ARCH=arm64 \
+        LLVM=1 \
+        LLVM_IAS=1 \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        -j"$JOBS" \
+        Image modules dtbs
+
+  - name: Verify build outputs
+    if: success()
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      OUT="$GITHUB_WORKSPACE/kernel-out"
+
+      echo "Important build outputs:"
+      find "$OUT" -type f \
+        \( -name Image \
+        -o -name Image.gz \
+        -o -name Image.lz4 \
+        -o -name vmlinux \
+        -o -name System.map \
+        -o -name '*.ko' \
+        -o -name '*.dtb' \
+        -o -name '*.dtbo' \
+        -o -name .config \) \
+        -printf '%p (%s bytes)\n'
+
+      if [[ ! -s "$OUT/arch/arm64/boot/Image" ]]; then
+        echo "::error::ARM64 Image was not generated."
+        exit 1
+      fi
+
+      if [[ "${{ inputs.ntsync }}" == "true" ]] &&
+         ! grep -q '^CONFIG_NTSYNC=y$' "$OUT/.config"; then
+        echo "::error::Final config does not have NTSYNC enabled."
+        exit 1
+      fi
+
+  - name: Save build information
+    if: always()
+    shell: bash
+    env:
+      KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+      KERNEL_COMMIT: ${{ steps.kernel.outputs.commit }}
+      KERNEL_REF: ${{ steps.source.outputs.ref }}
+      KERNEL_REPO: ${{ steps.source.outputs.url }}
+    run: |
+      {
+        echo "GitHub Sources Kernel Builder"
+        echo "Repository: ${KERNEL_REPO:-unknown}"
+        echo "Reference: ${KERNEL_REF:-unknown}"
+        echo "Kernel version: ${KERNEL_VERSION:-unknown}"
+        echo "Commit: ${KERNEL_COMMIT:-unknown}"
+        echo "NTSync requested: ${{ inputs.ntsync }}"
+        echo "Compiler:"
+        clang --version || true
+      } > "$GITHUB_WORKSPACE/build-info.txt"
+
+  - name: Upload kernel artifacts
+    if: always()
+    uses: actions/upload-artifact@v4
+    with:
+      name: github-kernel-${{ steps.kernel.outputs.version }}-${{ inputs.kernel_source }}
+      if-no-files-found: warn
+      path: |
+        kernel-out/**
+        kernel-config
+        build-info.txt
+```
 
