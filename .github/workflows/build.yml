@@ -5,31 +5,40 @@ on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: "Repositorio del kernel"
+        description: "Repositorio Android Common Kernel"
         required: true
         default: "https://android.googlesource.com/kernel/common"
         type: string
 
-      kernel_tag:
-        description: "Version exacta de Android GKI 5.10"
+      kernel_ref:
+        description: "Subnivel GKI 5.10 o rama LTS"
         required: true
         type: choice
         options:
+          # Tags GKI 5.10 por subnivel
+          - android12-5.10.226_r00
+          - android12-5.10.240_r00
           - android12-5.10.246_r00
-          - android12-5.10.260_r00
           - android12-5.10.264_r00
           - android12-5.10.269_r00
-        default: android12-5.10.269_r00
+
+          # Rama LTS
+          - android12-5.10-lts
+
+          # Rama Android Common Kernel
+          - android12-5.10
+
+        default: android12-5.10.246_r00
 
       ntsync:
-        description: "Aplicar parches NTSync (solo kernel 5.10)"
+        description: "Aplicar parches NTSync"
         required: true
         default: false
         type: boolean
 
 jobs:
   build:
-    name: Setup Kernel
+    name: Prepare Android GKI
     runs-on: ubuntu-latest
 
     steps:
@@ -37,153 +46,110 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup dependencies
+        shell: bash
         run: |
-          sudo apt update
-          sudo apt install -y git bc bison flex libssl-dev make clang llvm patch
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            git bc bison flex libssl-dev make clang llvm patch
 
-      - name: Validate and clone selected Android GKI tag
+      - name: Validate and clone GKI reference
         env:
           KERNEL_REPO: ${{ inputs.kernel_repo }}
-          KERNEL_TAG: ${{ inputs.kernel_tag }}
+          KERNEL_REF: ${{ inputs.kernel_ref }}
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p kernel
 
-          echo "===== Repositorio seleccionado ====="
+          echo "===== Repositorio ====="
           echo "$KERNEL_REPO"
 
-          echo "===== Tag seleccionado ====="
-          echo "$KERNEL_TAG"
+          echo "===== Referencia seleccionada ====="
+          echo "$KERNEL_REF"
 
-          if ! git ls-remote --exit-code --tags \
-            "$KERNEL_REPO" "refs/tags/$KERNEL_TAG" >/dev/null; then
-            echo "::error::El tag $KERNEL_TAG no existe en $KERNEL_REPO"
+          TAG_SHA="$(git ls-remote --refs "$KERNEL_REPO" \
+            "refs/tags/$KERNEL_REF" | cut -f1)"
+
+          BRANCH_SHA="$(git ls-remote --heads "$KERNEL_REPO" \
+            "refs/heads/$KERNEL_REF" | cut -f1)"
+
+          if [[ -z "$TAG_SHA" && -z "$BRANCH_SHA" ]]; then
+            echo "::error::La referencia $KERNEL_REF no existe."
             exit 1
+          fi
+
+          if [[ -n "$TAG_SHA" ]]; then
+            echo "Tipo de referencia: tag"
+          else
+            echo "Tipo de referencia: rama"
           fi
 
           git clone \
             --depth=1 \
             --single-branch \
-            --branch "$KERNEL_TAG" \
+            --branch "$KERNEL_REF" \
             "$KERNEL_REPO" \
             kernel/common
 
-          echo "===== Tag descargado ====="
-          git -C kernel/common describe --tags --exact-match HEAD
-
+          echo ""
           echo "===== Commit descargado ====="
           git -C kernel/common rev-parse HEAD
 
+          echo ""
+          echo "===== Tag exacto, si existe ====="
+          git -C kernel/common describe \
+            --tags --exact-match HEAD || true
+
+          echo ""
+          echo "===== Versión del kernel ====="
+          make -s -C kernel/common kernelversion
+
       - name: Kernel information
-        working-directory: kernel/common
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "===== Kernel information ====="
-
-          echo "Repository:"
-          git remote get-url origin
-
-          echo ""
-          echo "Tag:"
-          git describe --tags --exact-match HEAD
-
-          echo ""
-          echo "Commit:"
-          git rev-parse HEAD
-
-          echo ""
-          echo "Kernel version:"
-          make -s kernelversion
-
-          echo ""
-          echo "Android kernel config:"
-          grep -E '^(CONFIG_ANDROID|CONFIG_GKI|CONFIG_NTSYNC)=' \
-            .config 2>/dev/null || true
-
-      - name: Show NTSync patch context
-        if: ${{ inputs.ntsync }}
-        shell: bash
-        run: |
-          set -u
-
-          K=kernel/common
-          P="$GITHUB_WORKSPACE/patches/ntsync/android12-5.10/ntsync_compat_android12-5.10.patch"
-
-          echo "===== PATCH: diff headers and hunks ====="
-          grep -nE '^(diff --git|--- |\+\+\+ |@@)' "$P" || true
-
-          echo ""
-          echo "===== PATCH: first 230 lines ====="
-          sed -n '1,230p' "$P"
-
-          echo ""
-          echo "===== Kconfig ====="
-          sed -n '250,310p' "$K/drivers/misc/Kconfig"
-
-          echo ""
-          echo "===== Makefile ====="
-          sed -n '1,55p' "$K/drivers/misc/Makefile"
-
-          echo ""
-          echo "===== lockdep.h ====="
-          sed -n '270,350p' "$K/include/linux/lockdep.h"
-
-          echo ""
-          echo "===== lockdep.c: declarations and helpers ====="
-          sed -n '4770,4840p' "$K/kernel/locking/lockdep.c"
-
-          echo ""
-          echo "===== lockdep.c: lock held implementation ====="
-          sed -n '5280,5355p' "$K/kernel/locking/lockdep.c"
-
-          echo ""
-          echo "===== lockdep.c: assertion implementation ====="
-          sed -n '5570,5620p' "$K/kernel/locking/lockdep.c"
-
-      - name: Inspect NTSync compatibility points
-        if: ${{ inputs.ntsync }}
-        shell: bash
-        run: |
-          set -eu
-
           K=kernel/common
 
-          echo "===== VERSION ====="
+          echo "===== Repositorio ====="
+          git -C "$K" remote get-url origin
+
+          echo ""
+          echo "===== Commit ====="
+          git -C "$K" rev-parse HEAD
+
+          echo ""
+          echo "===== Versión ====="
           make -s -C "$K" kernelversion
 
           echo ""
-          echo "===== NTSYNC CONFIG LOCATION ====="
-          grep -n -E 'config (SGI_GRU_DEBUG|APDS9802ALS|NTSYNC)' \
-            "$K/drivers/misc/Kconfig" || true
+          echo "===== Configuración disponible ====="
+          grep -E '^(CONFIG_ANDROID|CONFIG_GKI|CONFIG_NTSYNC)=' \
+            "$K/.config" 2>/dev/null || true
 
-          echo ""
-          echo "===== MISC MAKEFILE CONTEXT ====="
-          sed -n '15,45p' "$K/drivers/misc/Makefile"
+      - name: Inspect NTSync patch files
+        if: ${{ inputs.ntsync }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          echo ""
-          echo "===== LOCKDEP STATE DEFINITIONS ====="
-          grep -n -E 'LOCK_STATE_|lockdep_assert(_once|_not_held|_held)' \
-            "$K/include/linux/lockdep.h" || true
+          P="patches/ntsync/android12-5.10"
 
-          echo ""
-          echo "===== LOCKDEP HEADER: ASSERTIONS ====="
-          sed -n '285,420p' "$K/include/linux/lockdep.h"
+          for name in \
+            0001-lockdep-detect-recursive-read.patch \
+            0002-lockdep-assert-none-held.patch \
+            ntsync_compat_android12-5.10.patch \
+            ntsync_base.patch
+          do
+            if [[ ! -f "$P/$name" ]]; then
+              echo "::error::Falta el parche $P/$name"
+              exit 1
+            fi
 
-          echo ""
-          echo "===== LOCKDEP C: INCLUDES ====="
-          sed -n '35,75p' "$K/kernel/locking/lockdep.c"
-
-          echo ""
-          echo "===== LOCKDEP C: HELD CHECK ====="
-          sed -n '5285,5335p' "$K/kernel/locking/lockdep.c"
-
-          echo ""
-          echo "===== LOCKDEP C: PUBLIC HELD CHECK ====="
-          sed -n '5585,5625p' "$K/kernel/locking/lockdep.c"
+            echo "Encontrado: $name"
+          done
 
       - name: Apply NTSync
         if: ${{ inputs.ntsync }}
@@ -193,10 +159,10 @@ jobs:
 
           chmod +x scripts/apply_ntsync.sh
 
-          KVER=$(make -s -C kernel/common kernelversion)
+          KVER="$(make -s -C kernel/common kernelversion)"
 
-          echo "===== Applying NTSync ====="
-          echo "Kernel version: $KVER"
+          echo "===== Aplicando NTSync ====="
+          echo "Versión detectada: $KVER"
 
           scripts/apply_ntsync.sh \
             kernel/common \
@@ -204,21 +170,23 @@ jobs:
 
       - name: Skip NTSync
         if: ${{ !inputs.ntsync }}
-        run: echo "NTSync disabled. Skipping patches."
+        run: echo "NTSync desactivado; no se aplicarán parches."
 
       - name: Final summary
-        shell: bash
         env:
-          KERNEL_TAG: ${{ inputs.kernel_tag }}
+          KERNEL_REF: ${{ inputs.kernel_ref }}
           NTSYNC_ENABLED: ${{ inputs.ntsync }}
+        shell: bash
         run: |
           set -euo pipefail
 
-          echo "===== Workflow summary ====="
-          echo "Selected tag: $KERNEL_TAG"
-          echo "Kernel version: $(make -s -C kernel/common kernelversion)"
-          echo "Commit: $(git -C kernel/common rev-parse HEAD)"
-          echo "NTSync enabled: $NTSYNC_ENABLED"
+          K=kernel/common
+
+          echo "===== Resumen final ====="
+          echo "Referencia: $KERNEL_REF"
+          echo "Versión: $(make -s -C "$K" kernelversion)"
+          echo "Commit: $(git -C "$K" rev-parse HEAD)"
+          echo "NTSync activado: $NTSYNC_ENABLED"
           echo ""
-          echo "Preparation and patch checks completed."
-          echo "This workflow does not compile the kernel."
+          echo "Preparación y comprobaciones finalizadas."
+          echo "Este workflow todavía no compila el kernel."
