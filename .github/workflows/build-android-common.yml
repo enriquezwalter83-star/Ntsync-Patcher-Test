@@ -13,16 +13,19 @@ options:
 - android12-5.10-2025-09_r2
 - android12-5.10-2025-05_r1
 
-custom_tag:
+```
+  custom_tag:
     description: "Tag personalizada opcional"
     required: false
     type: string
     default: ""
-ntsync:
+
+  ntsync:
     description: "Aplicar parches y habilitar NTSync"
     required: true
     type: boolean
     default: true
+```
 
 permissions:
 contents: read
@@ -37,6 +40,7 @@ name: Build Android Common 5.10 ARM64
 runs-on: ubuntu-22.04
 timeout-minutes: 360
 
+```
 steps:
   - name: Checkout patcher
     uses: actions/checkout@v4
@@ -253,3 +257,4 @@ steps:
         out/**/System.map
         out/**/.config
         build-info.txt
+```
