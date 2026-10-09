@@ -1,0 +1,187 @@
+name: Build Yuuka 5.10 + NTSync + AnyKernel3
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_source:
+        description: "Fuente del kernel"
+        required: true
+        type: choice
+        options:
+          - yuuka
+          - yuuka-fork
+          - android-common
+          - custom
+        default: yuuka
+
+      repository_url:
+        description: "URL Git personalizada"
+        required: false
+        type: string
+        default: ""
+
+      kernel_ref:
+        description: "Rama o tag del kernel"
+        required: false
+        type: string
+        default: ""
+
+      ntsync:
+        description: "Aplicar parches NTSync"
+        required: true
+        type: boolean
+        default: true
+
+
+permissions:
+  contents: read
+
+
+concurrency:
+  group: kernel-build-${{ github.ref }}
+  cancel-in-progress: false
+
+
+jobs:
+
+  build:
+
+    name: Build kernel and package AnyKernel3
+
+    runs-on: ubuntu-24.04
+
+    timeout-minutes: 360
+
+
+    steps:
+
+
+      - name: Checkout patcher
+        uses: actions/checkout@v4
+
+
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            cpio \
+            flex \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            clang \
+            llvm \
+            lld \
+            libelf-dev \
+            libssl-dev \
+            pahole \
+            python3 \
+            rsync \
+            zip \
+            unzip
+
+
+          echo "Compiler:"
+          clang --version
+
+          echo "Linker:"
+          ld.lld --version
+
+
+
+      - name: Select kernel repository
+        id: source
+        shell: bash
+        env:
+          SELECTED_SOURCE: ${{ inputs.kernel_source }}
+          CUSTOM_URL: ${{ inputs.repository_url }}
+          CUSTOM_REF: ${{ inputs.kernel_ref }}
+
+        run: |
+
+          set -euo pipefail
+
+
+          case "$SELECTED_SOURCE" in
+
+
+            yuuka)
+
+              DEFAULT_URL="https://github.com/MillenniumOSS/android_kernel_common_android12-5.10.git"
+              DEFAULT_REF="yuuka-main"
+
+            ;;
+
+
+            yuuka-fork)
+
+              DEFAULT_URL="https://github.com/enriquezwalter83-star/android_kernel_common_android12-5.10.git"
+              DEFAULT_REF="main"
+
+            ;;
+
+
+            android-common)
+
+              DEFAULT_URL="https://android.googlesource.com/kernel/common"
+              DEFAULT_REF="android12-5.10.246_r00"
+
+            ;;
+
+
+            custom)
+
+              DEFAULT_URL=""
+              DEFAULT_REF=""
+
+            ;;
+
+
+            *)
+
+              echo "::error::Unknown kernel source"
+              exit 1
+
+            ;;
+
+          esac
+
+
+
+          KERNEL_URL="$DEFAULT_URL"
+          KERNEL_REF="$DEFAULT_REF"
+
+
+
+          if [[ -n "${CUSTOM_URL//[[:space:]]/}" ]]; then
+              KERNEL_URL="$CUSTOM_URL"
+          fi
+
+
+          if [[ -n "${CUSTOM_REF//[[:space:]]/}" ]]; then
+              KERNEL_REF="$CUSTOM_REF"
+          fi
+
+
+
+          if [[ -z "$KERNEL_URL" || -z "$KERNEL_REF" ]]; then
+              echo "::error::Repository/ref missing"
+              exit 1
+          fi
+
+
+
+          echo "url=$KERNEL_URL" >> "$GITHUB_OUTPUT"
+          echo "ref=$KERNEL_REF" >> "$GITHUB_OUTPUT"
+
+
+          echo "Repository: $KERNEL_URL"
+          echo "Reference: $KERNEL_REF"
+          
