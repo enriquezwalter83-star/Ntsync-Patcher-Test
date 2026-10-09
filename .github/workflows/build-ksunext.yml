@@ -32,6 +32,11 @@ name: Build Yuuka 5.10 + NTSync + AnyKernel3
         type: boolean
         default: true
 
+      kernelsu_next:
+        description: "Aplicar KernelSU-Next"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -241,6 +246,25 @@ jobs:
 
           bash "$SCRIPT" "$KERNEL_DIR" "$KERNEL_VERSION"
 
+      - name: Apply KernelSU-Next
+        if: ${{ inputs.kernelsu_next }}
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ steps.kernel.outputs.dir }}
+        run: |
+          set -euo pipefail
+
+          cd "$KERNEL_DIR"
+
+          curl -LSs \
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh \
+            | bash -
+
+          echo "KernelSU-Next applied"
+
+          echo "Checking KernelSU Kconfig symbols..."
+
+          grep -R "^config " "$KERNEL_DIR" | grep -Ei "KSU|KERNELSU" || true
 
       - name: Prepare original Yuuka config + NTSync
         shell: bash
