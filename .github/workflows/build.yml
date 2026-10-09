@@ -72,7 +72,7 @@ jobs:
           echo "Android kernel config:"
           grep -E '^(CONFIG_ANDROID|CONFIG_GKI|CONFIG_NTSYNC)=' .config 2>/dev/null || true
 
-      - name: Diagnose NTSync patch context
+      - name: Show NTSync patch context
         if: ${{ inputs.ntsync }}
         shell: bash
         run: |
@@ -81,29 +81,36 @@ jobs:
           K=kernel/common
           P="$GITHUB_WORKSPACE/patches/ntsync/android12-5.10/ntsync_compat_android12-5.10.patch"
 
-          echo "===== Kernel identity ====="
-          git -C "$K" log -1 --format='%H %s'
-          make -s -C "$K" kernelversion
+          echo "===== PATCH: complete diff headers and hunks ====="
+          grep -nE '^(diff --git|--- |\+\+\+ |@@)' "$P" || true
 
           echo ""
-          echo "===== Patch metadata ====="
-          git diff --no-index -- /dev/null "$P" | head -n 100 || true
+          echo "===== PATCH: first 230 lines ====="
+          sed -n '1,230p' "$P"
 
           echo ""
-          echo "===== Patch hunks ====="
-          grep -nE '^(diff --git|index |--- |\+\+\+ |@@)' "$P" || true
+          echo "===== Kconfig ====="
+          sed -n '250,310p' "$K/drivers/misc/Kconfig"
 
           echo ""
-          echo "===== Relevant source locations ====="
-          grep -nE 'config MISC|obj-.*MISC|lockdep_assert|__lock_is_held|LOCK_STATE_' \
-            "$K/drivers/misc/Kconfig" \
-            "$K/drivers/misc/Makefile" \
-            "$K/include/linux/lockdep.h" \
-            "$K/kernel/locking/lockdep.c" || true
+          echo "===== Makefile ====="
+          sed -n '1,55p' "$K/drivers/misc/Makefile"
 
           echo ""
-          echo "===== Whitespace and patch integrity ====="
-          git -C "$K" apply --check --verbose "$P" || true
+          echo "===== lockdep.h ====="
+          sed -n '270,350p' "$K/include/linux/lockdep.h"
+
+          echo ""
+          echo "===== lockdep.c: declarations and helpers ====="
+          sed -n '4770,4840p' "$K/kernel/locking/lockdep.c"
+
+          echo ""
+          echo "===== lockdep.c: lock held implementation ====="
+          sed -n '5280,5355p' "$K/kernel/locking/lockdep.c"
+
+          echo ""
+          echo "===== lockdep.c: assertion implementation ====="
+          sed -n '5570,5620p' "$K/kernel/locking/lockdep.c"
       
       - name: Apply NTSync
         if: ${{ inputs.ntsync }}
