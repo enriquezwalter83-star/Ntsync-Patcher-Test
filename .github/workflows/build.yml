@@ -1,11 +1,11 @@
 
-name: Universal GKI Builder
+name: Android GKI 5.10 Builder
 
 on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: "Repositorio Android Common Kernel"
+        description: "Repositorio del kernel"
         required: true
         default: "https://android.googlesource.com/kernel/common"
         type: string
@@ -15,45 +15,76 @@ on:
         required: true
         type: choice
         options:
-          # Tags GKI 5.10 por subnivel
           - android12-5.10.226_r00
           - android12-5.10.240_r00
           - android12-5.10.246_r00
           - android12-5.10.264_r00
           - android12-5.10.269_r00
-
-          # Rama LTS
           - android12-5.10-lts
-
-          # Rama Android Common Kernel
           - android12-5.10
-
         default: android12-5.10.246_r00
 
       ntsync:
-        description: "Aplicar parches NTSync"
+        description: "Aplicar y activar NTSync"
         required: true
-        default: false
+        default: true
         type: boolean
 
 jobs:
   build:
-    name: Prepare Android GKI
+    name: Build Android GKI 5.10
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
       - name: Checkout builder
         uses: actions/checkout@v4
 
-      - name: Setup dependencies
+      - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
+
           sudo apt-get update
           sudo apt-get install -y \
-            git bc bison flex libssl-dev make clang llvm patch
+            bc bison build-essential curl flex git \
+            libelf-dev libssl-dev python3 rsync \
+            unzip zip
 
-      - name: Validate and clone GKI reference
+      - name: Install Repo launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/bin"
+
+          curl -fsSL \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Sync Android kernel build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p kernel
+          cd kernel
+
+          repo init \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b android12-5.10 \
+            --depth=1
+
+          repo sync -c -j2
+
+          echo "===== Build environment ready ====="
+          test -f build/build.sh
+          test -f common/build.config.gki.aarch64
+
+      - name: Validate and select kernel reference
         env:
           KERNEL_REPO: ${{ inputs.kernel_repo }}
           KERNEL_REF: ${{ inputs.kernel_ref }}
@@ -61,97 +92,50 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p kernel
+          K="$GITHUB_WORKSPACE/kernel/common"
 
-          echo "===== Repositorio ====="
-          echo "$KERNEL_REPO"
+          git -C "$K" remote set-url origin "$KERNEL_REPO"
 
-          echo "===== Referencia seleccionada ====="
-          echo "$KERNEL_REF"
+          TAG_SHA="$(
+            git ls-remote --refs "$KERNEL_REPO" \
+              "refs/tags/$KERNEL_REF" | cut -f1
+          )"
 
-          TAG_SHA="$(git ls-remote --refs "$KERNEL_REPO" \
-            "refs/tags/$KERNEL_REF" | cut -f1)"
+          BRANCH_SHA="$(
+            git ls-remote --heads "$KERNEL_REPO" \
+              "refs/heads/$KERNEL_REF" | cut -f1
+          )"
 
-          BRANCH_SHA="$(git ls-remote --heads "$KERNEL_REPO" \
-            "refs/heads/$KERNEL_REF" | cut -f1)"
+          if [[ -n "$TAG_SHA" ]]; then
+            echo "Selected reference is a tag: $KERNEL_REF"
 
-          if [[ -z "$TAG_SHA" && -z "$BRANCH_SHA" ]]; then
-            echo "::error::La referencia $KERNEL_REF no existe."
+            git -C "$K" fetch --depth=1 origin \
+              "refs/tags/$KERNEL_REF"
+
+            git -C "$K" checkout --detach FETCH_HEAD
+
+          elif [[ -n "$BRANCH_SHA" ]]; then
+            echo "Selected reference is a branch: $KERNEL_REF"
+
+            git -C "$K" fetch --depth=1 origin \
+              "refs/heads/$KERNEL_REF"
+
+            git -C "$K" checkout -B selected-kernel FETCH_HEAD
+
+          else
+            echo "::error::Reference not found: $KERNEL_REF"
             exit 1
           fi
 
-          if [[ -n "$TAG_SHA" ]]; then
-            echo "Tipo de referencia: tag"
-          else
-            echo "Tipo de referencia: rama"
-          fi
-
-          git clone \
-            --depth=1 \
-            --single-branch \
-            --branch "$KERNEL_REF" \
-            "$KERNEL_REPO" \
-            kernel/common
-
           echo ""
-          echo "===== Commit descargado ====="
-          git -C kernel/common rev-parse HEAD
-
-          echo ""
-          echo "===== Tag exacto, si existe ====="
-          git -C kernel/common describe \
-            --tags --exact-match HEAD || true
-
-          echo ""
-          echo "===== Versión del kernel ====="
-          make -s -C kernel/common kernelversion
-
-      - name: Kernel information
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          K=kernel/common
-
-          echo "===== Repositorio ====="
-          git -C "$K" remote get-url origin
-
-          echo ""
-          echo "===== Commit ====="
+          echo "===== Selected commit ====="
           git -C "$K" rev-parse HEAD
 
           echo ""
-          echo "===== Versión ====="
+          echo "===== Detected kernel version ====="
           make -s -C "$K" kernelversion
 
-          echo ""
-          echo "===== Configuración disponible ====="
-          grep -E '^(CONFIG_ANDROID|CONFIG_GKI|CONFIG_NTSYNC)=' \
-            "$K/.config" 2>/dev/null || true
-
-      - name: Inspect NTSync patch files
-        if: ${{ inputs.ntsync }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          P="patches/ntsync/android12-5.10"
-
-          for name in \
-            0001-lockdep-detect-recursive-read.patch \
-            0002-lockdep-assert-none-held.patch \
-            ntsync_compat_android12-5.10.patch \
-            ntsync_base.patch
-          do
-            if [[ ! -f "$P/$name" ]]; then
-              echo "::error::Falta el parche $P/$name"
-              exit 1
-            fi
-
-            echo "Encontrado: $name"
-          done
-
-      - name: Apply NTSync
+      - name: Apply NTSync patches
         if: ${{ inputs.ntsync }}
         shell: bash
         run: |
@@ -161,32 +145,105 @@ jobs:
 
           KVER="$(make -s -C kernel/common kernelversion)"
 
-          echo "===== Aplicando NTSync ====="
-          echo "Versión detectada: $KVER"
-
           scripts/apply_ntsync.sh \
             kernel/common \
             "$KVER"
 
-      - name: Skip NTSync
-        if: ${{ !inputs.ntsync }}
-        run: echo "NTSync desactivado; no se aplicarán parches."
+      - name: Enable NTSync in GKI defconfig
+        if: ${{ inputs.ntsync }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CONFIG="kernel/common/arch/arm64/configs/gki_defconfig"
+
+          if [[ ! -f "$CONFIG" ]]; then
+            echo "::error::GKI defconfig not found: $CONFIG"
+            exit 1
+          fi
+
+          # Remove an existing setting before enabling NTSync.
+          sed -i '/^CONFIG_NTSYNC=/d' "$CONFIG"
+          sed -i '/^# CONFIG_NTSYNC is not set$/d' "$CONFIG"
+
+          printf '\nCONFIG_NTSYNC=y\n' >> "$CONFIG"
+
+          echo "===== NTSync configuration ====="
+          tail -n 8 "$CONFIG"
+          grep -qx 'CONFIG_NTSYNC=y' "$CONFIG"
+
+      - name: Compile Android GKI 5.10
+        shell: bash
+        env:
+          NTSYNC_ENABLED: ${{ inputs.ntsync }}
+        run: |
+          set -euo pipefail
+
+          cd kernel
+
+          echo "===== Build configuration ====="
+          echo "common/build.config.gki.aarch64"
+
+          if [[ "$NTSYNC_ENABLED" == "true" ]]; then
+            echo "NTSync: enabled"
+          else
+            echo "NTSync: disabled"
+          fi
+
+          export OUT_DIR="$GITHUB_WORKSPACE/kernel-out"
+          export DIST_DIR="$GITHUB_WORKSPACE/kernel-dist"
+
+          # Android 12 GKI uses the legacy build.sh system.
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+            build/build.sh -j"$(nproc)"
+
+      - name: Verify build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIST="$GITHUB_WORKSPACE/kernel-dist"
+
+          if [[ ! -d "$DIST" ]]; then
+            echo "::error::Distribution directory was not created."
+            exit 1
+          fi
+
+          if ! find "$DIST" -maxdepth 1 -type f -print -quit \
+            | grep -q .; then
+            echo "::error::No build artifacts were generated."
+            exit 1
+          fi
+
+          echo "===== Generated artifacts ====="
+          find "$DIST" -maxdepth 1 -type f \
+            -printf '%f (%s bytes)\n' | sort
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gki-5.10-${{ inputs.kernel_ref }}-ntsync-${{ inputs.ntsync }}
+          path: kernel-dist/
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Final summary
+        if: always()
         env:
           KERNEL_REF: ${{ inputs.kernel_ref }}
           NTSYNC_ENABLED: ${{ inputs.ntsync }}
         shell: bash
         run: |
-          set -euo pipefail
+          echo "===== Build summary ====="
+          echo "Reference: $KERNEL_REF"
+          echo "NTSync requested: $NTSYNC_ENABLED"
 
-          K=kernel/common
+          if [[ -f kernel/common/Makefile ]]; then
+            echo "Kernel version:"
+            make -s -C kernel/common kernelversion || true
 
-          echo "===== Resumen final ====="
-          echo "Referencia: $KERNEL_REF"
-          echo "Versión: $(make -s -C "$K" kernelversion)"
-          echo "Commit: $(git -C "$K" rev-parse HEAD)"
-          echo "NTSync activado: $NTSYNC_ENABLED"
-          echo ""
-          echo "Preparación y comprobaciones finalizadas."
-          echo "Este workflow todavía no compila el kernel."
+            echo "Commit:"
+            git -C kernel/common rev-parse HEAD || true
+          fi
+
+          echo "Check the previous steps for the actual build result."
