@@ -11,19 +11,27 @@ on:
         default: "https://android.googlesource.com/kernel/common"
 
       kernel_ref:
-        description: "Tag o rama del kernel"
+        description: "Selecciona la versión del kernel"
         required: true
-        type: string
-        default: "android12-5.10.269_r00"
+        type: choice
+        options:
+          - android12-5.10.269_r00
+          - android12-5.10.264_r00
+          - android12-5.10.246_r00
+          - android12-5.10.240_r00
+          - android12-5.10.226_r00
+          - android12-5.10-lts
+          - android12-5.10
+        default: android12-5.10.269_r00
 
 jobs:
   test-patch:
-    name: Clone and test NTSync patch
+    name: Clone and test NTSync
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     steps:
-      - name: Checkout main branch
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
@@ -32,13 +40,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           sudo apt-get update
-          sudo apt-get install -y \
-            git python3 build-essential \
-            bc bison flex libelf-dev libssl-dev
+          sudo apt-get install -y git python3
 
-      - name: Clone Android Common Source
+      - name: Clone selected kernel reference
         env:
           KERNEL_REPO: ${{ inputs.kernel_repo }}
           KERNEL_REF: ${{ inputs.kernel_ref }}
@@ -58,25 +63,23 @@ jobs:
           if git ls-remote --exit-code --refs origin \
             "$TAG_REF" >/dev/null 2>&1; then
 
-            echo "Found tag: $KERNEL_REF"
+            echo "Selected tag: $KERNEL_REF"
             git fetch --depth=1 origin "$TAG_REF"
             git checkout --detach FETCH_HEAD
 
           elif git ls-remote --exit-code --heads origin \
             "$KERNEL_REF" >/dev/null 2>&1; then
 
-            echo "Found branch: $KERNEL_REF"
+            echo "Selected branch: $KERNEL_REF"
             git fetch --depth=1 origin "$BRANCH_REF"
             git checkout -B test-kernel FETCH_HEAD
 
           else
-            echo "::error::Kernel tag or branch not found"
-            echo "Repository: $KERNEL_REPO"
-            echo "Reference: $KERNEL_REF"
+            echo "::error::Reference not found: $KERNEL_REF"
             exit 1
           fi
 
-          echo "===== Kernel revision ====="
+          echo "===== Selected revision ====="
           git log -1 --format='%H%n%s'
 
           echo "===== Kernel version ====="
@@ -88,7 +91,7 @@ jobs:
           set -euo pipefail
 
           if [[ ! -f scripts/apply_ntsync.sh ]]; then
-            echo "::error::scripts/apply_ntsync.sh not found in main"
+            echo "::error::scripts/apply_ntsync.sh is missing from main"
             exit 1
           fi
 
@@ -103,47 +106,40 @@ jobs:
 
           chmod +x scripts/apply_ntsync.sh
 
-          echo "===== Applying NTSync ====="
-          echo "Kernel version: $KVER"
-
           scripts/apply_ntsync.sh \
-            kernel/common \
-            "$KVER"
+            kernel/common "$KVER"
 
-      - name: Verify patch changes
+      - name: Verify patch
         shell: bash
         run: |
           set -euo pipefail
 
           cd kernel/common
 
-          echo "===== Patch whitespace validation ====="
+          echo "===== Check patch formatting ====="
           git diff --check
 
           echo "===== Changed files ====="
           git status --short
 
           if [[ -z "$(git status --porcelain)" ]]; then
-            echo "::error::No source changes detected after patching"
+            echo "::error::No changes detected after applying NTSync"
             exit 1
           fi
 
           echo "===== Patch summary ====="
           git diff --stat
 
-          echo "===== NTSync patch test passed ====="
-          echo "Changes were detected and git diff --check passed."
+          echo "NTSync patch application completed successfully."
           echo "No kernel compilation was performed."
 
-      - name: Final summary
+      - name: Summary
         if: always()
+        env:
+          KERNEL_REF: ${{ inputs.kernel_ref }}
         shell: bash
         run: |
-          echo "================================"
-          echo "NTSync PATCH TEST"
-          echo "================================"
+          echo "===== NTSync Patch Test ====="
           echo "Branch: main"
-          echo "Kernel source: ${{ inputs.kernel_repo }}"
-          echo "Kernel reference: ${{ inputs.kernel_ref }}"
+          echo "Kernel reference: $KERNEL_REF"
           echo "Compilation: disabled"
-          echo "Flashing: not performed"
