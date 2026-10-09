@@ -1,26 +1,26 @@
 name: Android Common GKI 5.10 + NTSync
 
 'on':
-workflow_dispatch:
-inputs:
-kernel_release:
-description: "Version de Android Common GKI 5.10"
-required: true
-type: choice
-options:
-- android12-5.10-2025-12_r1
-- android12-5.10-2025-09_r2
-- android12-5.10-2025-05_r1
-custom_tag:
-description: "Nombre personalizado del artefacto (opcional)"
-required: false
-type: string
-default: ""
-ntsync:
-description: "Aplicar parches NTSync"
-required: true
-type: boolean
-default: true
+  workflow_dispatch:
+    inputs:
+      kernel_release:
+        description: 'Version de Android Common GKI 5.10'
+        required: true
+        type: choice
+        options:
+          - android12-5.10-2025-12_r1
+          - android12-5.10-2025-09_r2
+          - android12-5.10-2025-05_r1
+      custom_tag:
+        description: 'Nombre personalizado del artefacto'
+        required: false
+        type: string
+        default: ''
+      ntsync:
+        description: 'Aplicar parches NTSync'
+        required: true
+        type: boolean
+        default: true
 
 permissions:
 contents: read
