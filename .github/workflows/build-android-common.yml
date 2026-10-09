@@ -18,8 +18,7 @@ custom_tag:
     required: false
     type: string
     default: ""
-
-  ntsync:
+ntsync:
     description: "Aplicar parches y habilitar NTSync"
     required: true
     type: boolean
