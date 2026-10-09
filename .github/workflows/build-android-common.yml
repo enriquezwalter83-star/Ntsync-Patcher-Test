@@ -1,1 +1,262 @@
+name: Android Common GKI 5.10 + NTSync
+
+on:
+workflow_dispatch:
+inputs:
+kernel_release:
+description: "Release oficial de Android Common 5.10"
+required: true
+type: choice
+default: android12-5.10-2025-12_r1
+options:
+- android12-5.10-2025-12_r1
+- android12-5.10-2025-09_r2
+- android12-5.10-2025-05_r1
+
+```
+  custom_tag:
+    description: "Tag personalizada opcional; si se completa, reemplaza la selección anterior"
+    required: false
+    type: string
+    default: ""
+
+  ntsync:
+    description: "Aplicar parches y habilitar NTSync"
+    required: true
+    type: boolean
+    default: true
+```
+
+permissions:
+contents: read
+
+concurrency:
+group: android-common-gki-${{ github.ref }}
+cancel-in-progress: false
+
+jobs:
+build:
+name: Build Android Common 5.10 ARM64
+runs-on: ubuntu-22.04
+timeout-minutes: 360
+
+```
+steps:
+  - name: Checkout patcher
+    uses: actions/checkout@v4
+
+  - name: Install dependencies
+    shell: bash
+    run: |
+      set -euo pipefail
+      sudo apt-get update
+      sudo apt-get install -y \
+        bc bison build-essential ca-certificates \
+        cpio curl flex git gnupg gperf \
+        libelf-dev libncurses-dev libssl-dev \
+        lz4 make pahole perl python3 \
+        python-is-python3 rsync unzip zip \
+        wget xz-utils zstd
+
+  - name: Install Android repo tool
+    shell: bash
+    run: |
+      set -euo pipefail
+      mkdir -p "$HOME/bin"
+      curl -fsSL \
+        https://storage.googleapis.com/git-repo-downloads/repo \
+        -o "$HOME/bin/repo"
+      chmod a+x "$HOME/bin/repo"
+      echo "$HOME/bin" >> "$GITHUB_PATH"
+      repo --version
+
+  - name: Initialize Android Common workspace
+    shell: bash
+    env:
+      RELEASE_INPUT: ${{ inputs.kernel_release }}
+      CUSTOM_TAG_INPUT: ${{ inputs.custom_tag }}
+    run: |
+      set -euo pipefail
+
+      TAG="${CUSTOM_TAG_INPUT//[[:space:]]/}"
+      if [[ -z "$TAG" ]]; then
+        TAG="$RELEASE_INPUT"
+      fi
+
+      if [[ ! "$TAG" =~ ^android12-5\.10-[0-9]{4}-[0-9]{2}_r[0-9]+$ ]]; then
+        echo "::error::Invalid Android Common 5.10 release tag: $TAG"
+        exit 1
+      fi
+
+      echo "Selected release: $TAG"
+      echo "KERNEL_TAG=$TAG" >> "$GITHUB_ENV"
+
+      mkdir -p "$GITHUB_WORKSPACE/android-kernel"
+      cd "$GITHUB_WORKSPACE/android-kernel"
+
+      repo init \
+        -u https://android.googlesource.com/kernel/manifest \
+        -b common-android12-5.10
+
+      repo sync -c -j"$(nproc)" --no-clone-bundle
+
+      if [[ ! -d common/.git ]]; then
+        echo "::error::Android Common checkout not found at common/."
+        exit 1
+      fi
+
+      git -C common fetch --depth=1 origin \
+        "refs/tags/$TAG:refs/tags/$TAG"
+
+      git -C common checkout --detach "$TAG"
+
+      echo "Kernel commit:"
+      git -C common rev-parse HEAD
+
+      VERSION="$(make -s -C common kernelversion)"
+      echo "Detected Linux version: $VERSION"
+
+      if [[ ! "$VERSION" =~ ^5\.10\.[0-9]+$ ]]; then
+        echo "::error::Expected Linux 5.10.x; detected $VERSION"
+        exit 1
+      fi
+
+      echo "KERNEL_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+  - name: Apply NTSync patches
+    if: ${{ inputs.ntsync }}
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      K="$GITHUB_WORKSPACE/android-kernel/common"
+      SCRIPT="$GITHUB_WORKSPACE/scripts/apply_ntsync.sh"
+
+      if [[ ! -f "$SCRIPT" ]]; then
+        echo "::error::scripts/apply_ntsync.sh not found."
+        exit 1
+      fi
+
+      bash "$SCRIPT" "$K" "$KERNEL_VERSION"
+
+  - name: Enable NTSync in GKI defconfig
+    if: ${{ inputs.ntsync }}
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      K="$GITHUB_WORKSPACE/android-kernel/common"
+      DEFCONFIG="$K/arch/arm64/configs/gki_defconfig"
+
+      if [[ ! -f "$DEFCONFIG" ]]; then
+        echo "::error::gki_defconfig not found."
+        exit 1
+      fi
+
+      if ! grep -RqsE 'config NTSYNC([[:space:]]|$)' \
+          "$K/drivers" "$K/kernel" "$K/fs" "$K/arch/arm64" 2>/dev/null; then
+        echo "::error::NTSYNC Kconfig entry was not found after patching."
+        exit 1
+      fi
+
+      "$K/scripts/config" --file "$DEFCONFIG" --enable NTSYNC
+
+      if ! grep -q '^CONFIG_NTSYNC=y$' "$DEFCONFIG"; then
+        echo "::error::Failed to enable CONFIG_NTSYNC in gki_defconfig."
+        exit 1
+      fi
+
+      echo "CONFIG_NTSYNC enabled in gki_defconfig."
+
+  - name: Verify Android GKI build system
+    shell: bash
+    run: |
+      set -euo pipefail
+      cd "$GITHUB_WORKSPACE/android-kernel"
+
+      if [[ ! -f build/build.sh ]]; then
+        echo "::error::Android kernel build/build.sh is missing."
+        echo "The checked-out manifest may not provide the expected legacy build system."
+        exit 1
+      fi
+
+      if [[ ! -f common/build.config.gki.aarch64 ]]; then
+        echo "::error::common/build.config.gki.aarch64 is missing."
+        exit 1
+      fi
+
+      echo "Android GKI build scripts found."
+
+  - name: Compile GKI ARM64
+    shell: bash
+    run: |
+      set -euo pipefail
+      cd "$GITHUB_WORKSPACE/android-kernel"
+
+      export BUILD_CONFIG=common/build.config.gki.aarch64
+      export OUT_DIR="$GITHUB_WORKSPACE/out"
+      export DIST_DIR="$GITHUB_WORKSPACE/dist"
+      export SKIP_MRPROPER=1
+
+      mkdir -p "$OUT_DIR" "$DIST_DIR"
+
+      echo "Release: $KERNEL_TAG"
+      echo "Linux: $KERNEL_VERSION"
+      echo "Build config: $BUILD_CONFIG"
+
+      build/build.sh
+
+  - name: Verify build outputs
+    if: success()
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      echo "Distribution files:"
+      find "$GITHUB_WORKSPACE/dist" \
+        -maxdepth 3 -type f -printf '%p (%s bytes)\n'
+
+      if ! find "$GITHUB_WORKSPACE/dist" -type f \
+          \( -name 'Image' -o -name 'Image.gz' \
+             -o -name 'Image.lz4' -o -name 'boot.img' \) \
+          -print -quit | grep -q .; then
+        echo "::error::Build completed but no expected kernel image was found in dist/."
+        exit 1
+      fi
+
+  - name: Save build information
+    if: always()
+    shell: bash
+    run: |
+      {
+        echo "Android Common GKI 5.10 build"
+        echo "Release tag: ${KERNEL_TAG:-unknown}"
+        echo "Linux version: ${KERNEL_VERSION:-unknown}"
+        echo "NTSync requested: ${{ inputs.ntsync }}"
+        if [[ -d "$GITHUB_WORKSPACE/android-kernel/common/.git" ]]; then
+          echo "Kernel commit:"
+          git -C "$GITHUB_WORKSPACE/android-kernel/common" rev-parse HEAD
+        fi
+        if command -v clang >/dev/null 2>&1; then
+          echo "System Clang:"
+          clang --version
+        fi
+      } > "$GITHUB_WORKSPACE/build-info.txt"
+
+  - name: Upload kernel artifacts
+    if: always()
+    uses: actions/upload-artifact@v4
+    with:
+      name: android-common-${{ inputs.kernel_release }}-linux-${{ env.KERNEL_VERSION }}
+      if-no-files-found: warn
+      path: |
+        dist/**
+        out/**/Image
+        out/**/Image.gz
+        out/**/Image.lz4
+        out/**/vmlinux
+        out/**/System.map
+        out/**/.config
+        build-info.txt
+```
 
