@@ -317,7 +317,13 @@ jobs:
 
 
 
-        bash scripts/apply_ntsync.sh "$KERNEL_DIR"
+        KERNEL_VERSION=$(make -s -C "$KERNEL_DIR" kernelversion)
+
+        echo "Detected kernel version: $KERNEL_VERSION"
+
+        bash scripts/apply_ntsync.sh \
+        "$KERNEL_DIR" \
+        "$KERNEL_VERSION"
 
 
 
